@@ -1,0 +1,13 @@
+{
+  "name": "hello-hapi",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@hapi/hapi": "^21.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

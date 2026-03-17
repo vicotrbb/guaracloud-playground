@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.output/
+.next/
+.nuxt/
+.svelte-kit/
+.angular/
+target/
+bin/
+obj/
+__pycache__/
+*.pyc
+.cache/
+public/*.js
+public/*.css
+public/*.map

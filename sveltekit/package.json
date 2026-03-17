@@ -1,0 +1,16 @@
+{
+  "name": "hello-sveltekit",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "start": "node build/index.js"
+  },
+  "dependencies": {
+    "@sveltejs/adapter-node": "^5.2.0",
+    "@sveltejs/kit": "^2.15.0",
+    "svelte": "^5.0.0",
+    "vite": "^6.0.0"
+  },
+  "type": "module"
+}

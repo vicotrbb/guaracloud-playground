@@ -1,0 +1,13 @@
+{
+  "name": "hello-fastify",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "fastify": "^5.2.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "hello-koa",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "koa": "^2.15.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

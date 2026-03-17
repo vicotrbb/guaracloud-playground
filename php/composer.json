@@ -1,0 +1,9 @@
+{
+  "name": "guara/hello-php",
+  "require": {
+    "php": ">=8.1"
+  },
+  "scripts": {
+    "start": "php -S 0.0.0.0:${PORT:-8080} -t htdocs"
+  }
+}
