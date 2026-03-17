@@ -1,6 +1,6 @@
 # Guara Cloud Playground
 
-Playground repository with hello world examples for every framework and language supported by [Guara Cloud](https://guara.cloud).
+Playground repository with hello world examples for every framework and language supported by [Guara Cloud](https://guaracloud.com).
 
 Each folder contains a minimal, deployable hello world project — backend projects return `{"message": "Hello from <tech>!"}` on `GET /`, and frontend projects render a simple page.
 
