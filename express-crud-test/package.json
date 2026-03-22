@@ -1,0 +1,14 @@
+{
+  "name": "express-crud-test",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "better-sqlite3": "^11.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

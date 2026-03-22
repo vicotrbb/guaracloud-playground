@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Contacts - Express CRUD Test</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; padding: 2rem; }
+      h1 { text-align: center; margin-bottom: 2rem; }
+      .container { max-width: 600px; margin: 0 auto; }
+      form { background: #fff; padding: 1.5rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 2rem; display: flex; gap: 0.75rem; }
+      input { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem; }
+      button { padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.95rem; }
+      button[type="submit"] { background: #2563eb; color: #fff; }
+      button[type="submit"]:hover { background: #1d4ed8; }
+      .delete-btn { background: #ef4444; color: #fff; font-size: 0.8rem; padding: 0.3rem 0.6rem; }
+      .delete-btn:hover { background: #dc2626; }
+      table { width: 100%; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-collapse: collapse; }
+      th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #eee; }
+      th { background: #f9fafb; font-weight: 600; }
+      .empty { text-align: center; padding: 2rem; color: #999; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Contacts</h1>
+      <form id="contactForm">
+        <input type="text" id="nameInput" placeholder="Name" required />
+        <input type="tel" id="phoneInput" placeholder="Phone number" required />
+        <button type="submit">Add</button>
+      </form>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Phone</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="contactsBody">
+          <tr><td colspan="4" class="empty">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <script>
+      const form = document.getElementById("contactForm");
+      const tbody = document.getElementById("contactsBody");
+      const nameInput = document.getElementById("nameInput");
+      const phoneInput = document.getElementById("phoneInput");
+
+      function clearTable() {
+        while (tbody.firstChild) {
+          tbody.removeChild(tbody.firstChild);
+        }
+      }
+
+      function createTextCell(text) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        return td;
+      }
+
+      function createDeleteCell(id) {
+        const td = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.className = "delete-btn";
+        btn.textContent = "Delete";
+        btn.addEventListener("click", function () {
+          deleteContact(id);
+        });
+        td.appendChild(btn);
+        return td;
+      }
+
+      async function loadContacts() {
+        const res = await fetch("/api/contacts");
+        const contacts = await res.json();
+        clearTable();
+
+        if (contacts.length === 0) {
+          const tr = document.createElement("tr");
+          const td = document.createElement("td");
+          td.colSpan = 4;
+          td.className = "empty";
+          td.textContent = "No contacts yet.";
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+          return;
+        }
+
+        contacts.forEach(function (c) {
+          const tr = document.createElement("tr");
+          tr.appendChild(createTextCell(c.id));
+          tr.appendChild(createTextCell(c.name));
+          tr.appendChild(createTextCell(c.phone));
+          tr.appendChild(createDeleteCell(c.id));
+          tbody.appendChild(tr);
+        });
+      }
+
+      form.addEventListener("submit", async function (e) {
+        e.preventDefault();
+        const name = nameInput.value.trim();
+        const phone = phoneInput.value.trim();
+        if (!name || !phone) return;
+        await fetch("/api/contacts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name, phone: phone }),
+        });
+        nameInput.value = "";
+        phoneInput.value = "";
+        loadContacts();
+      });
+
+      async function deleteContact(id) {
+        await fetch("/api/contacts/" + id, { method: "DELETE" });
+        loadContacts();
+      }
+
+      loadContacts();
+    </script>
+  </body>
+</html>
