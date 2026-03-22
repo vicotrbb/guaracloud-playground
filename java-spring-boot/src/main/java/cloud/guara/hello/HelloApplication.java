@@ -17,6 +17,6 @@ public class HelloApplication {
 
     @GetMapping("/")
     public Map<String, String> hello() {
-        return Map.of("message", "Hello from Java Spring Boot!");
+        return Map.of("message", "Hello from Java Spring Boot! This is a Test App!!!!!", "test": "true");
     }
 }
