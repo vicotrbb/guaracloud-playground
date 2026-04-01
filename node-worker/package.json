@@ -1,0 +1,9 @@
+{
+  "name": "node-worker",
+  "version": "1.0.0",
+  "description": "Simple Node.js worker that logs a message every 5 seconds",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  }
+}
