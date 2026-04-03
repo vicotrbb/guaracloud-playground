@@ -1,9 +1,10 @@
 const express = require("express");
 const app = express();
 const port = process.env.PORT || 8080;
+const message = process.env.CUSTOM_MESSAGE ?? 'Express!'
 
 app.get("/", (req, res) => {
-  res.json({ message: "Hello from Express!" });
+  res.json({ message: `Hello from ${message}` });
 });
 
 app.listen(port, () => {
