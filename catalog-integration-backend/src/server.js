@@ -7,6 +7,13 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 app.use(express.json());
+app.enableCors({
+  origin: ['*'],
+  methods: ['*'],
+  allowedHeaders: ['*'],
+  credentials: false,
+  maxAge: 86400,
+});
 
 const state = {
   pg: { connected: false, error: null },
