@@ -66,15 +66,24 @@ async function initRedis() {
 }
 
 async function initNats() {
-  const url = process.env.NATS_URL;
-  if (!url) {
-    state.nats.error = "NATS_URL not set";
-    console.error("[nats] NATS_URL env var not found");
+  const host = process.env.NATS_HOST;
+  const port = process.env.NATS_PORT || "4222";
+  const user = process.env.NATS_USER;
+  const pass = process.env.NATS_PASSWORD;
+
+  if (!host) {
+    state.nats.error = "NATS_HOST not set";
+    console.error("[nats] NATS_HOST env var not found");
     return;
   }
 
   try {
-    nc = await connect({ servers: url });
+    const servers = `nats://${host}:${port}`;
+    nc = await connect({
+      servers,
+      user: user || undefined,
+      pass: pass || undefined,
+    });
     state.nats.connected = true;
     console.log("[nats] Connected to", nc.getServer());
 
