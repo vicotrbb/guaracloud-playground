@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 
-const API = "/api";
+const API = import.meta.env.VITE_BACKEND_URL
+  ? `${import.meta.env.VITE_BACKEND_URL.replace(/\/$/, "")}`
+  : "/api";
 
 function StatusBadge({ connected, error }) {
   if (error) return <span className="status-badge disconnected">{error}</span>;
