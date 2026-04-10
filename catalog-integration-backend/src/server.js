@@ -1,8 +1,8 @@
 import cors from "cors";
 import express from "express";
-import pg from "pg";
+import mysql from "mysql2/promise";
+import { MongoClient } from "mongodb";
 import Redis from "ioredis";
-import { connect } from "nats";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -11,143 +11,126 @@ app.use(cors());
 app.use(express.json());
 
 const state = {
-  pg: { connected: false, error: null },
-  redis: { connected: false, error: null },
-  nats: { connected: false, error: null },
+  mysql: { connected: false, error: null },
+  mongodb: { connected: false, error: null },
+  valkey: { connected: false, error: null },
 };
 
-let pgPool = null;
-let redisClient = null;
-let nc = null;
-let natsSubscription = null;
-const receivedMessages = [];
+let mysqlPool = null;
+let mongoClient = null;
+let mongoDb = null;
+let valkeyClient = null;
 
-async function initPostgres() {
-  // Support both direct env vars and GuaraCloud auto-injected CATALOG_* vars
-  const connectionString =
-    process.env.POSTGRES_URL || process.env.CATALOG_POSTGRES_URL;
-  if (!connectionString) {
-    state.pg.error = "POSTGRES_URL not set";
-    console.error("[postgres] POSTGRES_URL env var not found");
+// ---------------------------------------------------------------------------
+// MySQL
+// ---------------------------------------------------------------------------
+
+async function initMySQL() {
+  const url = process.env.MYSQL_URL || process.env.CATALOG_MYSQL_URL;
+  if (!url) {
+    state.mysql.error = "MYSQL_URL not set";
+    console.error("[mysql] MYSQL_URL env var not found");
     return;
   }
-
   try {
-    pgPool = new pg.Pool({ connectionString });
-    await pgPool.query(`
+    mysqlPool = await mysql.createPool(url);
+    await mysqlPool.execute(`
       CREATE TABLE IF NOT EXISTS test_items (
-        id SERIAL PRIMARY KEY,
+        id INT AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
         value TEXT,
-        created_at TIMESTAMP DEFAULT NOW()
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    state.pg.connected = true;
-    console.log("[postgres] Connected and schema ready");
+    state.mysql.connected = true;
+    console.log("[mysql] Connected and schema ready");
   } catch (err) {
-    state.pg.error = err.message;
-    console.error("[postgres] Connection failed:", err.message);
+    state.mysql.error = err.message;
+    console.error("[mysql] Connection failed:", err.message);
   }
 }
 
-async function initRedis() {
-  // Support both direct env vars and GuaraCloud auto-injected CATALOG_* vars
-  const url = process.env.REDIS_URL || process.env.CATALOG_REDIS_URL;
+// ---------------------------------------------------------------------------
+// MongoDB
+// ---------------------------------------------------------------------------
+
+async function initMongoDB() {
+  const url =
+    process.env.MONGODB_URL || process.env.CATALOG_MONGODB_URL;
+  const dbName =
+    process.env.MONGODB_DATABASE ||
+    process.env.CATALOG_MONGODB_DATABASE ||
+    "testdb";
   if (!url) {
-    state.redis.error = "REDIS_URL not set";
-    console.error("[redis] REDIS_URL env var not found");
+    state.mongodb.error = "MONGODB_URL not set";
+    console.error("[mongodb] MONGODB_URL env var not found");
     return;
   }
-
   try {
-    redisClient = new Redis(url);
-    await redisClient.ping();
-    state.redis.connected = true;
-    console.log("[redis] Connected");
+    mongoClient = new MongoClient(url, { serverSelectionTimeoutMS: 10000 });
+    await mongoClient.connect();
+    mongoDb = mongoClient.db(dbName);
+    // Verify connectivity
+    await mongoDb.command({ ping: 1 });
+    state.mongodb.connected = true;
+    console.log("[mongodb] Connected to db:", dbName);
   } catch (err) {
-    state.redis.error = err.message;
-    console.error("[redis] Connection failed:", err.message);
+    state.mongodb.error = err.message;
+    console.error("[mongodb] Connection failed:", err.message);
   }
 }
 
-async function initNats() {
-  // Support both direct env vars and GuaraCloud auto-injected CATALOG_* vars.
-  // GuaraCloud only injects the full CATALOG_NATS_URL (not user/pass separately),
-  // so prefer URL-based connection when individual vars are not available.
-  const natsUrl =
-    process.env.NATS_URL || process.env.CATALOG_NATS_URL;
-  const host = process.env.NATS_HOST || process.env.CATALOG_NATS_HOST;
-  const port = process.env.NATS_PORT || process.env.CATALOG_NATS_PORT || "4222";
-  const user = process.env.NATS_USER;
-  const pass = process.env.NATS_PASSWORD;
+// ---------------------------------------------------------------------------
+// Valkey (Redis-compatible — uses ioredis)
+// ---------------------------------------------------------------------------
 
-  if (!natsUrl && !host) {
-    state.nats.error = "NATS_URL or NATS_HOST not set";
-    console.error("[nats] NATS_URL / NATS_HOST env var not found");
+async function initValkey() {
+  const url = process.env.VALKEY_URL || process.env.CATALOG_VALKEY_URL;
+  if (!url) {
+    state.valkey.error = "VALKEY_URL not set";
+    console.error("[valkey] VALKEY_URL env var not found");
     return;
   }
-
   try {
-    const servers = natsUrl || `nats://${host}:${port}`;
-    nc = await connect({
-      servers,
-      user: user || undefined,
-      pass: pass || undefined,
-    });
-    state.nats.connected = true;
-    console.log("[nats] Connected to", nc.getServer());
-
-    natsSubscription = nc.subscribe("catalog-test.>", {
-      callback: (err, msg) => {
-        if (err) {
-          console.error("[nats] Subscription error:", err.message);
-          return;
-        }
-        const data = new TextDecoder().decode(msg.data);
-        receivedMessages.push({
-          subject: msg.subject,
-          data,
-          timestamp: new Date().toISOString(),
-        });
-        if (receivedMessages.length > 100) receivedMessages.shift();
-        console.log(`[nats] Received on "${msg.subject}": ${data}`);
-      },
-    });
-
-    console.log("[nats] Subscribed to catalog-test.>");
+    valkeyClient = new Redis(url);
+    await valkeyClient.ping();
+    state.valkey.connected = true;
+    console.log("[valkey] Connected");
   } catch (err) {
-    state.nats.error = err.message;
-    console.error("[nats] Connection failed:", err.message);
+    state.valkey.error = err.message;
+    console.error("[valkey] Connection failed:", err.message);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Status / health
+// ---------------------------------------------------------------------------
 
 app.get("/", (_req, res) => {
   res.json({
     message: "Catalog Integration Backend",
-    services: {
-      postgres: state.pg,
-      redis: state.redis,
-      nats: state.nats,
-    },
+    services: { mysql: state.mysql, mongodb: state.mongodb, valkey: state.valkey },
   });
 });
 
 app.get("/health", (_req, res) => {
   const allConnected =
-    state.pg.connected && state.redis.connected && state.nats.connected;
+    state.mysql.connected && state.mongodb.connected && state.valkey.connected;
   res.status(allConnected ? 200 : 503).json({
     status: allConnected ? "healthy" : "degraded",
     services: state,
   });
 });
 
-// --- PostgreSQL endpoints ---
+// ---------------------------------------------------------------------------
+// MySQL endpoints
+// ---------------------------------------------------------------------------
 
-app.get("/postgres/items", async (_req, res) => {
-  if (!pgPool)
-    return res.status(503).json({ error: "PostgreSQL not connected" });
+app.get("/mysql/items", async (_req, res) => {
+  if (!mysqlPool)
+    return res.status(503).json({ error: "MySQL not connected" });
   try {
-    const { rows } = await pgPool.query(
+    const [rows] = await mysqlPool.execute(
       "SELECT * FROM test_items ORDER BY created_at DESC",
     );
     res.json({ items: rows });
@@ -156,15 +139,19 @@ app.get("/postgres/items", async (_req, res) => {
   }
 });
 
-app.post("/postgres/items", async (req, res) => {
-  if (!pgPool)
-    return res.status(503).json({ error: "PostgreSQL not connected" });
+app.post("/mysql/items", async (req, res) => {
+  if (!mysqlPool)
+    return res.status(503).json({ error: "MySQL not connected" });
   const { name, value } = req.body;
   if (!name) return res.status(400).json({ error: "name is required" });
   try {
-    const { rows } = await pgPool.query(
-      "INSERT INTO test_items (name, value) VALUES ($1, $2) RETURNING *",
+    const [result] = await mysqlPool.execute(
+      "INSERT INTO test_items (name, value) VALUES (?, ?)",
       [name, value ?? null],
+    );
+    const [rows] = await mysqlPool.execute(
+      "SELECT * FROM test_items WHERE id = ?",
+      [result.insertId],
     );
     res.status(201).json({ item: rows[0] });
   } catch (err) {
@@ -172,15 +159,15 @@ app.post("/postgres/items", async (req, res) => {
   }
 });
 
-app.delete("/postgres/items/:id", async (req, res) => {
-  if (!pgPool)
-    return res.status(503).json({ error: "PostgreSQL not connected" });
+app.delete("/mysql/items/:id", async (req, res) => {
+  if (!mysqlPool)
+    return res.status(503).json({ error: "MySQL not connected" });
   try {
-    const { rowCount } = await pgPool.query(
-      "DELETE FROM test_items WHERE id = $1",
+    const [result] = await mysqlPool.execute(
+      "DELETE FROM test_items WHERE id = ?",
       [req.params.id],
     );
-    if (rowCount === 0)
+    if (result.affectedRows === 0)
       return res.status(404).json({ error: "Item not found" });
     res.json({ deleted: true });
   } catch (err) {
@@ -188,13 +175,81 @@ app.delete("/postgres/items/:id", async (req, res) => {
   }
 });
 
-// --- Redis endpoints ---
+// ---------------------------------------------------------------------------
+// MongoDB endpoints
+// ---------------------------------------------------------------------------
 
-app.get("/redis/get/:key", async (req, res) => {
-  if (!redisClient)
-    return res.status(503).json({ error: "Redis not connected" });
+app.get("/mongodb/docs", async (_req, res) => {
+  if (!mongoDb)
+    return res.status(503).json({ error: "MongoDB not connected" });
   try {
-    const value = await redisClient.get(req.params.key);
+    const docs = await mongoDb
+      .collection("test_docs")
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .toArray();
+    res.json({ docs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/mongodb/docs", async (req, res) => {
+  if (!mongoDb)
+    return res.status(503).json({ error: "MongoDB not connected" });
+  const { name, data } = req.body;
+  if (!name) return res.status(400).json({ error: "name is required" });
+  try {
+    const doc = { name, data: data ?? null, createdAt: new Date() };
+    const result = await mongoDb.collection("test_docs").insertOne(doc);
+    res.status(201).json({ doc: { _id: result.insertedId, ...doc } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/mongodb/docs/:id", async (req, res) => {
+  if (!mongoDb)
+    return res.status(503).json({ error: "MongoDB not connected" });
+  try {
+    const { ObjectId } = await import("mongodb");
+    const result = await mongoDb
+      .collection("test_docs")
+      .deleteOne({ _id: new ObjectId(req.params.id) });
+    if (result.deletedCount === 0)
+      return res.status(404).json({ error: "Document not found" });
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/mongodb/stats", async (_req, res) => {
+  if (!mongoDb)
+    return res.status(503).json({ error: "MongoDB not connected" });
+  try {
+    const count = await mongoDb.collection("test_docs").countDocuments();
+    const dbStats = await mongoDb.command({ dbStats: 1 });
+    res.json({
+      docCount: count,
+      collections: dbStats.collections,
+      dataSize: dbStats.dataSize,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Valkey endpoints (Redis-compatible)
+// ---------------------------------------------------------------------------
+
+app.get("/valkey/get/:key", async (req, res) => {
+  if (!valkeyClient)
+    return res.status(503).json({ error: "Valkey not connected" });
+  try {
+    const value = await valkeyClient.get(req.params.key);
     if (value === null) return res.status(404).json({ error: "Key not found" });
     res.json({ key: req.params.key, value });
   } catch (err) {
@@ -202,17 +257,17 @@ app.get("/redis/get/:key", async (req, res) => {
   }
 });
 
-app.post("/redis/set", async (req, res) => {
-  if (!redisClient)
-    return res.status(503).json({ error: "Redis not connected" });
+app.post("/valkey/set", async (req, res) => {
+  if (!valkeyClient)
+    return res.status(503).json({ error: "Valkey not connected" });
   const { key, value, ttl } = req.body;
   if (!key || value === undefined)
     return res.status(400).json({ error: "key and value required" });
   try {
     if (ttl) {
-      await redisClient.set(key, value, "EX", Number(ttl));
+      await valkeyClient.set(key, value, "EX", Number(ttl));
     } else {
-      await redisClient.set(key, value);
+      await valkeyClient.set(key, value);
     }
     res.json({ key, value, ttl: ttl ?? null });
   } catch (err) {
@@ -220,125 +275,93 @@ app.post("/redis/set", async (req, res) => {
   }
 });
 
-app.get("/redis/incr/:key", async (req, res) => {
-  if (!redisClient)
-    return res.status(503).json({ error: "Redis not connected" });
+app.get("/valkey/incr/:key", async (req, res) => {
+  if (!valkeyClient)
+    return res.status(503).json({ error: "Valkey not connected" });
   try {
-    const value = await redisClient.incr(req.params.key);
+    const value = await valkeyClient.incr(req.params.key);
     res.json({ key: req.params.key, value });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/redis/info", async (_req, res) => {
-  if (!redisClient)
-    return res.status(503).json({ error: "Redis not connected" });
+app.get("/valkey/info", async (_req, res) => {
+  if (!valkeyClient)
+    return res.status(503).json({ error: "Valkey not connected" });
   try {
-    const info = await redisClient.info();
-    const dbsize = await redisClient.dbsize();
+    const info = await valkeyClient.info();
+    const dbsize = await valkeyClient.dbsize();
     res.json({ dbsize, info: info.substring(0, 500) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- NATS endpoints ---
+// ---------------------------------------------------------------------------
+// Combined test endpoint
+// ---------------------------------------------------------------------------
 
-app.post("/nats/publish", async (req, res) => {
-  if (!nc) return res.status(503).json({ error: "NATS not connected" });
-  const { subject, message } = req.body;
-  if (!subject || !message)
-    return res.status(400).json({ error: "subject and message required" });
-  try {
-    nc.publish(subject, new TextEncoder().encode(message));
-    res.json({ published: true, subject, message });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+app.post("/test/all", async (_req, res) => {
+  const results = { mysql: null, mongodb: null, valkey: null };
 
-app.get("/nats/messages", (_req, res) => {
-  res.json({ messages: receivedMessages });
-});
-
-app.post("/nats/request", async (req, res) => {
-  if (!nc) return res.status(503).json({ error: "NATS not connected" });
-  const { subject, message, timeout = 5000 } = req.body;
-  if (!subject || !message)
-    return res.status(400).json({ error: "subject and message required" });
-  try {
-    const response = await nc.request(
-      subject,
-      new TextEncoder().encode(message),
-      { timeout },
-    );
-    res.json({ reply: new TextDecoder().decode(response.data) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- Combined test endpoint ---
-
-app.post("/test/all", async (req, res) => {
-  const results = { postgres: null, redis: null, nats: null };
-
-  if (pgPool) {
+  if (mysqlPool) {
     try {
-      const { rows } = await pgPool.query(
-        "INSERT INTO test_items (name, value) VALUES ($1, $2) RETURNING *",
+      const [result] = await mysqlPool.execute(
+        "INSERT INTO test_items (name, value) VALUES (?, ?)",
         ["test-all", `combined-test-${Date.now()}`],
       );
-      results.postgres = { ok: true, item: rows[0] };
+      results.mysql = { ok: true, insertId: result.insertId };
     } catch (err) {
-      results.postgres = { ok: false, error: err.message };
+      results.mysql = { ok: false, error: err.message };
     }
   } else {
-    results.postgres = { ok: false, error: "not connected" };
+    results.mysql = { ok: false, error: "not connected" };
   }
 
-  if (redisClient) {
+  if (mongoDb) {
+    try {
+      const doc = { name: "test-all", data: `combined-test-${Date.now()}`, createdAt: new Date() };
+      const r = await mongoDb.collection("test_docs").insertOne(doc);
+      results.mongodb = { ok: true, insertedId: r.insertedId.toString() };
+    } catch (err) {
+      results.mongodb = { ok: false, error: err.message };
+    }
+  } else {
+    results.mongodb = { ok: false, error: "not connected" };
+  }
+
+  if (valkeyClient) {
     try {
       const key = `test:all:${Date.now()}`;
-      await redisClient.set(key, `value-${Date.now()}`);
-      const value = await redisClient.get(key);
-      results.redis = { ok: true, key, value };
+      await valkeyClient.set(key, `value-${Date.now()}`);
+      const value = await valkeyClient.get(key);
+      results.valkey = { ok: true, key, value };
     } catch (err) {
-      results.redis = { ok: false, error: err.message };
+      results.valkey = { ok: false, error: err.message };
     }
   } else {
-    results.redis = { ok: false, error: "not connected" };
-  }
-
-  if (nc) {
-    try {
-      nc.publish(
-        "catalog-test.all",
-        new TextEncoder().encode(`test-${Date.now()}`),
-      );
-      results.nats = { ok: true, published: true };
-    } catch (err) {
-      results.nats = { ok: false, error: err.message };
-    }
-  } else {
-    results.nats = { ok: false, error: "not connected" };
+    results.valkey = { ok: false, error: "not connected" };
   }
 
   res.json(results);
 });
 
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
+
 const server = app.listen(PORT, () => {
   console.log(`[server] Listening on port ${PORT}`);
-  initPostgres();
-  initRedis();
-  initNats();
+  initMySQL();
+  initMongoDB();
+  initValkey();
 });
 
 process.on("SIGTERM", () => {
   console.log("[server] SIGTERM received, shutting down");
   server.close();
-  if (pgPool) pgPool.end();
-  if (redisClient) redisClient.quit();
-  if (nc) nc.close();
+  if (mysqlPool) mysqlPool.end();
+  if (mongoClient) mongoClient.close();
+  if (valkeyClient) valkeyClient.quit();
 });

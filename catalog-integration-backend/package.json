@@ -1,7 +1,7 @@
 {
   "name": "catalog-integration-backend",
   "version": "1.0.0",
-  "description": "Integration test backend for Guara Cloud catalog services (PostgreSQL, Redis, NATS)",
+  "description": "Integration test backend for Guara Cloud catalog services (MySQL, MongoDB, Valkey)",
   "type": "module",
   "scripts": {
     "start": "node src/server.js"
@@ -10,8 +10,8 @@
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "ioredis": "^5.6.1",
-    "nats": "^2.29.3",
-    "pg": "^8.16.0"
+    "mongodb": "^6.15.0",
+    "mysql2": "^3.14.0"
   },
   "engines": {
     "node": ">=20"
