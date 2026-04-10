@@ -2,7 +2,7 @@ import cors from "cors";
 import express from "express";
 import amqp from "amqplib";
 import { MeiliSearch } from "meilisearch";
-import * as Minio from "minio";
+import memjs from "memjs";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -13,15 +13,14 @@ app.use(express.json());
 const state = {
   rabbitmq: { connected: false, error: null },
   meilisearch: { connected: false, error: null },
-  minio: { connected: false, error: null },
+  memcached: { connected: false, error: null },
 };
 
 let rabbitmqConnection = null;
 let rabbitmqChannel = null;
 let meiliClient = null;
-let minioClient = null;
+let memcachedClient = null;
 
-const MINIO_BUCKET = "test-bucket";
 const MEILI_INDEX = "test-index";
 const RABBITMQ_QUEUE = "test-queue";
 
@@ -76,41 +75,33 @@ async function initMeilisearch() {
 }
 
 // ---------------------------------------------------------------------------
-// MinIO
+// Memcached
 // ---------------------------------------------------------------------------
 
-async function initMinio() {
-  const endpoint =
-    process.env.MINIO_ENDPOINT || process.env.CATALOG_MINIO_ENDPOINT;
-  const accessKey =
-    process.env.MINIO_ACCESS_KEY || process.env.CATALOG_MINIO_ACCESS_KEY;
-  const secretKey =
-    process.env.MINIO_SECRET_KEY || process.env.CATALOG_MINIO_SECRET_KEY;
-
-  if (!endpoint) {
-    state.minio.error = "MINIO_ENDPOINT not set";
-    console.error("[minio] MINIO_ENDPOINT env var not found");
+async function initMemcached() {
+  const host =
+    process.env.MEMCACHED_HOST || process.env.CATALOG_MEMCACHED_HOST;
+  const port =
+    process.env.MEMCACHED_PORT || process.env.CATALOG_MEMCACHED_PORT || "11211";
+  if (!host) {
+    state.memcached.error = "MEMCACHED_HOST not set";
+    console.error("[memcached] MEMCACHED_HOST env var not found");
     return;
   }
   try {
-    const [host, portStr] = endpoint.split(":");
-    const port = portStr ? parseInt(portStr, 10) : 9000;
-    minioClient = new Minio.Client({
-      endPoint: host,
-      port,
-      useSSL: false,
-      accessKey: accessKey ?? "",
-      secretKey: secretKey ?? "",
+    memcachedClient = memjs.Client.create(`${host}:${port}`, {
+      timeout: 2,
+      retries: 1,
     });
-    const exists = await minioClient.bucketExists(MINIO_BUCKET);
-    if (!exists) {
-      await minioClient.makeBucket(MINIO_BUCKET);
-    }
-    state.minio.connected = true;
-    console.log("[minio] Connected, bucket ready:", MINIO_BUCKET);
+    // Test connectivity with a set/get round trip
+    await memcachedClient.set("__health__", "ok", { expires: 10 });
+    const { value } = await memcachedClient.get("__health__");
+    if (!value) throw new Error("Health check round-trip failed");
+    state.memcached.connected = true;
+    console.log("[memcached] Connected:", `${host}:${port}`);
   } catch (err) {
-    state.minio.error = err.message;
-    console.error("[minio] Connection failed:", err.message);
+    state.memcached.error = err.message;
+    console.error("[memcached] Connection failed:", err.message);
   }
 }
 
@@ -124,7 +115,7 @@ app.get("/", (_req, res) => {
     services: {
       rabbitmq: state.rabbitmq,
       meilisearch: state.meilisearch,
-      minio: state.minio,
+      memcached: state.memcached,
     },
   });
 });
@@ -133,7 +124,7 @@ app.get("/health", (_req, res) => {
   const allConnected =
     state.rabbitmq.connected &&
     state.meilisearch.connected &&
-    state.minio.connected;
+    state.memcached.connected;
   res.status(allConnected ? 200 : 503).json({
     status: allConnected ? "healthy" : "degraded",
     services: state,
@@ -264,86 +255,54 @@ app.get("/meilisearch/stats", async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// MinIO endpoints
+// Memcached endpoints
 // ---------------------------------------------------------------------------
 
-app.get("/minio/objects", async (_req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
+app.post("/memcached/set", async (req, res) => {
+  if (!memcachedClient)
+    return res.status(503).json({ error: "Memcached not connected" });
+  const { key, value, expires } = req.body;
+  if (!key || value === undefined)
+    return res.status(400).json({ error: "key and value required" });
   try {
-    const objects = [];
-    await new Promise((resolve, reject) => {
-      const stream = minioClient.listObjects(MINIO_BUCKET, "", false);
-      stream.on("data", (obj) => objects.push(obj));
-      stream.on("end", resolve);
-      stream.on("error", reject);
+    await memcachedClient.set(key, String(value), {
+      expires: expires ? Number(expires) : 0,
     });
-    res.json({ objects, bucket: MINIO_BUCKET });
+    res.json({ key, value, expires: expires ?? 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/minio/upload", async (req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
-  const { name, content } = req.body;
-  if (!name) return res.status(400).json({ error: "name is required" });
+app.get("/memcached/get/:key", async (req, res) => {
+  if (!memcachedClient)
+    return res.status(503).json({ error: "Memcached not connected" });
   try {
-    const data = content ?? `test-content-${Date.now()}`;
-    const buf = Buffer.from(data);
-    await minioClient.putObject(MINIO_BUCKET, name, buf, buf.length, {
-      "content-type": "text/plain",
-    });
-    res.status(201).json({ bucket: MINIO_BUCKET, name, size: buf.length });
+    const { value } = await memcachedClient.get(req.params.key);
+    if (!value) return res.status(404).json({ error: "Key not found" });
+    res.json({ key: req.params.key, value: value.toString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/minio/download/:name", async (req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
+app.delete("/memcached/delete/:key", async (req, res) => {
+  if (!memcachedClient)
+    return res.status(503).json({ error: "Memcached not connected" });
   try {
-    const stream = await minioClient.getObject(MINIO_BUCKET, req.params.name);
-    const chunks = [];
-    await new Promise((resolve, reject) => {
-      stream.on("data", (chunk) => chunks.push(chunk));
-      stream.on("end", resolve);
-      stream.on("error", reject);
-    });
-    const content = Buffer.concat(chunks).toString();
-    res.json({ name: req.params.name, content });
-  } catch (err) {
-    if (err.code === "NoSuchKey") return res.status(404).json({ error: "Object not found" });
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete("/minio/objects/:name", async (req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
-  try {
-    await minioClient.removeObject(MINIO_BUCKET, req.params.name);
-    res.json({ deleted: true, name: req.params.name });
+    const deleted = await memcachedClient.delete(req.params.key);
+    res.json({ deleted, key: req.params.key });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/minio/stats", async (_req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
+app.get("/memcached/stats", async (_req, res) => {
+  if (!memcachedClient)
+    return res.status(503).json({ error: "Memcached not connected" });
   try {
-    const objects = [];
-    await new Promise((resolve, reject) => {
-      const stream = minioClient.listObjects(MINIO_BUCKET, "", false);
-      stream.on("data", (obj) => objects.push(obj));
-      stream.on("end", resolve);
-      stream.on("error", reject);
-    });
-    const totalSize = objects.reduce((sum, o) => sum + (o.size ?? 0), 0);
-    res.json({ bucket: MINIO_BUCKET, objectCount: objects.length, totalSize });
+    const stats = await memcachedClient.stats();
+    res.json({ stats });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -354,7 +313,7 @@ app.get("/minio/stats", async (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/test/all", async (_req, res) => {
-  const results = { rabbitmq: null, meilisearch: null, minio: null };
+  const results = { rabbitmq: null, meilisearch: null, memcached: null };
 
   if (rabbitmqChannel) {
     try {
@@ -374,7 +333,11 @@ app.post("/test/all", async (_req, res) => {
   if (meiliClient) {
     try {
       const index = meiliClient.index(MEILI_INDEX);
-      const doc = { id: Date.now(), title: "test-all", content: `ts-${Date.now()}` };
+      const doc = {
+        id: Date.now(),
+        title: "test-all",
+        content: `ts-${Date.now()}`,
+      };
       const task = await index.addDocuments([doc]);
       results.meilisearch = { ok: true, taskUid: task.taskUid };
     } catch (err) {
@@ -384,17 +347,18 @@ app.post("/test/all", async (_req, res) => {
     results.meilisearch = { ok: false, error: "not connected" };
   }
 
-  if (minioClient) {
+  if (memcachedClient) {
     try {
-      const name = `test-all-${Date.now()}.txt`;
-      const data = Buffer.from(`combined-test-${Date.now()}`);
-      await minioClient.putObject(MINIO_BUCKET, name, data, data.length);
-      results.minio = { ok: true, name, bucket: MINIO_BUCKET };
+      const key = `test:all:${Date.now()}`;
+      const value = `value-${Date.now()}`;
+      await memcachedClient.set(key, value, { expires: 60 });
+      const { value: got } = await memcachedClient.get(key);
+      results.memcached = { ok: true, key, value: got?.toString() };
     } catch (err) {
-      results.minio = { ok: false, error: err.message };
+      results.memcached = { ok: false, error: err.message };
     }
   } else {
-    results.minio = { ok: false, error: "not connected" };
+    results.memcached = { ok: false, error: "not connected" };
   }
 
   res.json(results);
@@ -408,11 +372,12 @@ const server = app.listen(PORT, () => {
   console.log(`[server] Listening on port ${PORT}`);
   initRabbitMQ();
   initMeilisearch();
-  initMinio();
+  initMemcached();
 });
 
 process.on("SIGTERM", () => {
   console.log("[server] SIGTERM received, shutting down");
   server.close();
   if (rabbitmqConnection) rabbitmqConnection.close();
+  if (memcachedClient) memcachedClient.close();
 });

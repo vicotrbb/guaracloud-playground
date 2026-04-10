@@ -27,12 +27,11 @@ export default function App() {
   const [meiliHits, setMeiliHits] = useState(null);
   const [meiliStats, setMeiliStats] = useState(null);
 
-  // MinIO
-  const [minioName, setMinioName] = useState("");
-  const [minioContent, setMinioContent] = useState("");
-  const [minioObjects, setMinioObjects] = useState([]);
-  const [minioDownloaded, setMinioDownloaded] = useState(null);
-  const [minioStats, setMinioStats] = useState(null);
+  // Memcached
+  const [mcKey, setMcKey] = useState("");
+  const [mcValue, setMcValue] = useState("");
+  const [mcResult, setMcResult] = useState(null);
+  const [mcStats, setMcStats] = useState(null);
 
   const [logs, setLogs] = useState([]);
 
@@ -78,7 +77,7 @@ export default function App() {
     const data = await api("/test/all", { method: "POST" });
     if (data) {
       addLog(
-        `Test all: RabbitMQ=${data.rabbitmq?.ok} Meilisearch=${data.meilisearch?.ok} MinIO=${data.minio?.ok}`,
+        `Test all: RabbitMQ=${data.rabbitmq?.ok} Meilisearch=${data.meilisearch?.ok} Memcached=${data.memcached?.ok}`,
       );
     }
   };
@@ -154,49 +153,42 @@ export default function App() {
     }
   };
 
-  // --- MinIO ---
-  const uploadMinio = async () => {
-    if (!minioName.trim()) return;
-    const data = await api("/minio/upload", {
+  // --- Memcached ---
+  const setMemcached = async () => {
+    if (!mcKey.trim() || !mcValue.trim()) return;
+    const data = await api("/memcached/set", {
       method: "POST",
-      body: JSON.stringify({ name: minioName, content: minioContent || null }),
+      body: JSON.stringify({ key: mcKey, value: mcValue }),
     });
     if (data) {
-      addLog(`MinIO uploaded: ${data.name} (${data.size} bytes)`);
-      setMinioName("");
-      setMinioContent("");
-      fetchMinioObjects();
+      addLog(`Memcached SET ${mcKey} = ${mcValue}`);
+      setMcResult(data);
     }
   };
 
-  const fetchMinioObjects = async () => {
-    const data = await api("/minio/objects");
-    if (data?.objects) {
-      setMinioObjects(data.objects);
-      addLog(`MinIO: ${data.objects.length} objects in bucket`);
-    }
-  };
-
-  const downloadMinio = async (name) => {
-    const data = await api(`/minio/download/${encodeURIComponent(name)}`);
+  const getMemcached = async () => {
+    if (!mcKey.trim()) return;
+    const data = await api(`/memcached/get/${encodeURIComponent(mcKey)}`);
     if (data) {
-      setMinioDownloaded(data);
-      addLog(`MinIO downloaded: ${name}`);
+      addLog(`Memcached GET ${mcKey} = ${data.value ?? "nil"}`);
+      setMcResult(data);
     }
   };
 
-  const deleteMinio = async (name) => {
-    await api(`/minio/objects/${encodeURIComponent(name)}`, { method: "DELETE" });
-    addLog(`MinIO deleted: ${name}`);
-    fetchMinioObjects();
-    setMinioDownloaded(null);
+  const deleteMemcached = async () => {
+    if (!mcKey.trim()) return;
+    const data = await api(`/memcached/delete/${encodeURIComponent(mcKey)}`, { method: "DELETE" });
+    if (data) {
+      addLog(`Memcached DEL ${mcKey}`);
+      setMcResult(data);
+    }
   };
 
-  const fetchMinioStats = async () => {
-    const data = await api("/minio/stats");
+  const fetchMemcachedStats = async () => {
+    const data = await api("/memcached/stats");
     if (data) {
-      setMinioStats(data);
-      addLog(`MinIO stats: ${data.objectCount} objects, ${data.totalSize} bytes`);
+      setMcStats(data);
+      addLog("Memcached stats fetched");
     }
   };
 
@@ -210,7 +202,7 @@ export default function App() {
     <div className="container">
       <h1>Catalog Integration Test</h1>
       <p className="subtitle">
-        Testing RabbitMQ, Meilisearch, and MinIO catalog services on Guara Cloud
+        Testing RabbitMQ, Meilisearch, and Memcached catalog services on Guara Cloud
       </p>
 
       <div className="status-grid">
@@ -229,10 +221,10 @@ export default function App() {
           />
         </div>
         <div className="status-card">
-          <h3>MinIO</h3>
+          <h3>Memcached</h3>
           <StatusBadge
-            connected={status.services?.minio?.connected}
-            error={status.services?.minio?.error}
+            connected={status.services?.memcached?.connected}
+            error={status.services?.memcached?.error}
           />
         </div>
       </div>
@@ -313,56 +305,35 @@ export default function App() {
         )}
       </div>
 
-      {/* MinIO */}
+      {/* Memcached */}
       <div className="section">
-        <h2>MinIO - Object Storage</h2>
+        <h2>Memcached - Cache</h2>
         <div className="row">
           <input
-            placeholder="Object name"
-            value={minioName}
-            onChange={(e) => setMinioName(e.target.value)}
+            placeholder="Key"
+            value={mcKey}
+            onChange={(e) => setMcKey(e.target.value)}
           />
           <input
-            placeholder="Content (optional)"
-            value={minioContent}
-            onChange={(e) => setMinioContent(e.target.value)}
+            placeholder="Value"
+            value={mcValue}
+            onChange={(e) => setMcValue(e.target.value)}
           />
-          <button className="btn btn-success" onClick={uploadMinio}>
-            Upload
+          <button className="btn btn-success" onClick={setMemcached}>
+            SET
           </button>
-          <button className="btn btn-primary" onClick={fetchMinioObjects}>
-            List Objects
+          <button className="btn btn-primary" onClick={getMemcached}>
+            GET
           </button>
-          <button className="btn btn-primary" onClick={fetchMinioStats}>
+          <button className="btn btn-danger" onClick={deleteMemcached}>
+            DEL
+          </button>
+          <button className="btn btn-primary" onClick={fetchMemcachedStats}>
             Stats
           </button>
         </div>
-        {minioStats && <pre>{JSON.stringify(minioStats, null, 2)}</pre>}
-        {minioDownloaded && (
-          <pre>{JSON.stringify(minioDownloaded, null, 2)}</pre>
-        )}
-        {minioObjects.length > 0 && (
-          <div style={{ marginTop: "0.5rem" }}>
-            {minioObjects.map((obj) => (
-              <span key={obj.name} style={{ marginRight: "0.5rem", marginBottom: "0.5rem", display: "inline-block" }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => downloadMinio(obj.name)}
-                  style={{ fontSize: "0.7rem" }}
-                >
-                  Get {obj.name}
-                </button>
-                <button
-                  className="btn btn-danger"
-                  onClick={() => deleteMinio(obj.name)}
-                  style={{ fontSize: "0.7rem" }}
-                >
-                  Del
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
+        {mcResult && <pre>{JSON.stringify(mcResult, null, 2)}</pre>}
+        {mcStats && <pre>{JSON.stringify(mcStats, null, 2)}</pre>}
       </div>
 
       <div className="section">

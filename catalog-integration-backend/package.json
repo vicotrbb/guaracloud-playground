@@ -1,7 +1,7 @@
 {
   "name": "catalog-integration-backend",
   "version": "1.0.0",
-  "description": "Integration test backend for Guara Cloud catalog services (RabbitMQ, Meilisearch, MinIO)",
+  "description": "Integration test backend for Guara Cloud catalog services (RabbitMQ, Meilisearch, Memcached)",
   "type": "module",
   "scripts": {
     "start": "node src/server.js"
@@ -11,7 +11,7 @@
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "meilisearch": "^0.44.0",
-    "minio": "^8.0.4"
+    "memjs": "^1.3.2"
   },
   "engines": {
     "node": ">=20"
