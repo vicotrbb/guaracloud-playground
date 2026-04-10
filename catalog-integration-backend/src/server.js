@@ -1,8 +1,8 @@
 import cors from "cors";
 import express from "express";
-import mysql from "mysql2/promise";
-import { MongoClient } from "mongodb";
-import Redis from "ioredis";
+import amqp from "amqplib";
+import { MeiliSearch } from "meilisearch";
+import * as Minio from "minio";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -11,94 +11,106 @@ app.use(cors());
 app.use(express.json());
 
 const state = {
-  mysql: { connected: false, error: null },
-  mongodb: { connected: false, error: null },
-  valkey: { connected: false, error: null },
+  rabbitmq: { connected: false, error: null },
+  meilisearch: { connected: false, error: null },
+  minio: { connected: false, error: null },
 };
 
-let mysqlPool = null;
-let mongoClient = null;
-let mongoDb = null;
-let valkeyClient = null;
+let rabbitmqConnection = null;
+let rabbitmqChannel = null;
+let meiliClient = null;
+let minioClient = null;
+
+const MINIO_BUCKET = "test-bucket";
+const MEILI_INDEX = "test-index";
+const RABBITMQ_QUEUE = "test-queue";
 
 // ---------------------------------------------------------------------------
-// MySQL
+// RabbitMQ
 // ---------------------------------------------------------------------------
 
-async function initMySQL() {
-  const url = process.env.MYSQL_URL || process.env.CATALOG_MYSQL_URL;
+async function initRabbitMQ() {
+  const url = process.env.RABBITMQ_URL || process.env.CATALOG_RABBITMQ_URL;
   if (!url) {
-    state.mysql.error = "MYSQL_URL not set";
-    console.error("[mysql] MYSQL_URL env var not found");
+    state.rabbitmq.error = "RABBITMQ_URL not set";
+    console.error("[rabbitmq] RABBITMQ_URL env var not found");
     return;
   }
   try {
-    mysqlPool = await mysql.createPool(url);
-    await mysqlPool.execute(`
-      CREATE TABLE IF NOT EXISTS test_items (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        value TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    state.mysql.connected = true;
-    console.log("[mysql] Connected and schema ready");
+    rabbitmqConnection = await amqp.connect(url);
+    rabbitmqChannel = await rabbitmqConnection.createChannel();
+    await rabbitmqChannel.assertQueue(RABBITMQ_QUEUE, { durable: true });
+    state.rabbitmq.connected = true;
+    console.log("[rabbitmq] Connected, queue ready:", RABBITMQ_QUEUE);
   } catch (err) {
-    state.mysql.error = err.message;
-    console.error("[mysql] Connection failed:", err.message);
+    state.rabbitmq.error = err.message;
+    console.error("[rabbitmq] Connection failed:", err.message);
   }
 }
 
 // ---------------------------------------------------------------------------
-// MongoDB
+// Meilisearch
 // ---------------------------------------------------------------------------
 
-async function initMongoDB() {
+async function initMeilisearch() {
   const url =
-    process.env.MONGODB_URL || process.env.CATALOG_MONGODB_URL;
-  const dbName =
-    process.env.MONGODB_DATABASE ||
-    process.env.CATALOG_MONGODB_DATABASE ||
-    "testdb";
+    process.env.MEILISEARCH_URL || process.env.CATALOG_MEILISEARCH_URL;
+  const masterKey =
+    process.env.MEILISEARCH_MASTER_KEY ||
+    process.env.CATALOG_MEILISEARCH_MASTER_KEY;
   if (!url) {
-    state.mongodb.error = "MONGODB_URL not set";
-    console.error("[mongodb] MONGODB_URL env var not found");
+    state.meilisearch.error = "MEILISEARCH_URL not set";
+    console.error("[meilisearch] MEILISEARCH_URL env var not found");
     return;
   }
   try {
-    mongoClient = new MongoClient(url, { serverSelectionTimeoutMS: 10000 });
-    await mongoClient.connect();
-    mongoDb = mongoClient.db(dbName);
-    // Verify connectivity
-    await mongoDb.command({ ping: 1 });
-    state.mongodb.connected = true;
-    console.log("[mongodb] Connected to db:", dbName);
+    meiliClient = new MeiliSearch({ host: url, apiKey: masterKey });
+    await meiliClient.health();
+    await meiliClient.createIndex(MEILI_INDEX, { primaryKey: "id" });
+    state.meilisearch.connected = true;
+    console.log("[meilisearch] Connected, index ready:", MEILI_INDEX);
   } catch (err) {
-    state.mongodb.error = err.message;
-    console.error("[mongodb] Connection failed:", err.message);
+    state.meilisearch.error = err.message;
+    console.error("[meilisearch] Connection failed:", err.message);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Valkey (Redis-compatible — uses ioredis)
+// MinIO
 // ---------------------------------------------------------------------------
 
-async function initValkey() {
-  const url = process.env.VALKEY_URL || process.env.CATALOG_VALKEY_URL;
-  if (!url) {
-    state.valkey.error = "VALKEY_URL not set";
-    console.error("[valkey] VALKEY_URL env var not found");
+async function initMinio() {
+  const endpoint =
+    process.env.MINIO_ENDPOINT || process.env.CATALOG_MINIO_ENDPOINT;
+  const accessKey =
+    process.env.MINIO_ACCESS_KEY || process.env.CATALOG_MINIO_ACCESS_KEY;
+  const secretKey =
+    process.env.MINIO_SECRET_KEY || process.env.CATALOG_MINIO_SECRET_KEY;
+
+  if (!endpoint) {
+    state.minio.error = "MINIO_ENDPOINT not set";
+    console.error("[minio] MINIO_ENDPOINT env var not found");
     return;
   }
   try {
-    valkeyClient = new Redis(url);
-    await valkeyClient.ping();
-    state.valkey.connected = true;
-    console.log("[valkey] Connected");
+    const [host, portStr] = endpoint.split(":");
+    const port = portStr ? parseInt(portStr, 10) : 9000;
+    minioClient = new Minio.Client({
+      endPoint: host,
+      port,
+      useSSL: false,
+      accessKey: accessKey ?? "",
+      secretKey: secretKey ?? "",
+    });
+    const exists = await minioClient.bucketExists(MINIO_BUCKET);
+    if (!exists) {
+      await minioClient.makeBucket(MINIO_BUCKET);
+    }
+    state.minio.connected = true;
+    console.log("[minio] Connected, bucket ready:", MINIO_BUCKET);
   } catch (err) {
-    state.valkey.error = err.message;
-    console.error("[valkey] Connection failed:", err.message);
+    state.minio.error = err.message;
+    console.error("[minio] Connection failed:", err.message);
   }
 }
 
@@ -109,13 +121,19 @@ async function initValkey() {
 app.get("/", (_req, res) => {
   res.json({
     message: "Catalog Integration Backend",
-    services: { mysql: state.mysql, mongodb: state.mongodb, valkey: state.valkey },
+    services: {
+      rabbitmq: state.rabbitmq,
+      meilisearch: state.meilisearch,
+      minio: state.minio,
+    },
   });
 });
 
 app.get("/health", (_req, res) => {
   const allConnected =
-    state.mysql.connected && state.mongodb.connected && state.valkey.connected;
+    state.rabbitmq.connected &&
+    state.meilisearch.connected &&
+    state.minio.connected;
   res.status(allConnected ? 200 : 503).json({
     status: allConnected ? "healthy" : "degraded",
     services: state,
@@ -123,118 +141,65 @@ app.get("/health", (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// MySQL endpoints
+// RabbitMQ endpoints
 // ---------------------------------------------------------------------------
 
-app.get("/mysql/items", async (_req, res) => {
-  if (!mysqlPool)
-    return res.status(503).json({ error: "MySQL not connected" });
+app.post("/rabbitmq/publish", async (req, res) => {
+  if (!rabbitmqChannel)
+    return res.status(503).json({ error: "RabbitMQ not connected" });
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: "message is required" });
   try {
-    const [rows] = await mysqlPool.execute(
-      "SELECT * FROM test_items ORDER BY created_at DESC",
+    const sent = rabbitmqChannel.sendToQueue(
+      RABBITMQ_QUEUE,
+      Buffer.from(JSON.stringify({ message, timestamp: Date.now() })),
+      { persistent: true },
     );
-    res.json({ items: rows });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/mysql/items", async (req, res) => {
-  if (!mysqlPool)
-    return res.status(503).json({ error: "MySQL not connected" });
-  const { name, value } = req.body;
-  if (!name) return res.status(400).json({ error: "name is required" });
-  try {
-    const [result] = await mysqlPool.execute(
-      "INSERT INTO test_items (name, value) VALUES (?, ?)",
-      [name, value ?? null],
-    );
-    const [rows] = await mysqlPool.execute(
-      "SELECT * FROM test_items WHERE id = ?",
-      [result.insertId],
-    );
-    res.status(201).json({ item: rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete("/mysql/items/:id", async (req, res) => {
-  if (!mysqlPool)
-    return res.status(503).json({ error: "MySQL not connected" });
-  try {
-    const [result] = await mysqlPool.execute(
-      "DELETE FROM test_items WHERE id = ?",
-      [req.params.id],
-    );
-    if (result.affectedRows === 0)
-      return res.status(404).json({ error: "Item not found" });
-    res.json({ deleted: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// MongoDB endpoints
-// ---------------------------------------------------------------------------
-
-app.get("/mongodb/docs", async (_req, res) => {
-  if (!mongoDb)
-    return res.status(503).json({ error: "MongoDB not connected" });
-  try {
-    const docs = await mongoDb
-      .collection("test_docs")
-      .find({})
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .toArray();
-    res.json({ docs });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/mongodb/docs", async (req, res) => {
-  if (!mongoDb)
-    return res.status(503).json({ error: "MongoDB not connected" });
-  const { name, data } = req.body;
-  if (!name) return res.status(400).json({ error: "name is required" });
-  try {
-    const doc = { name, data: data ?? null, createdAt: new Date() };
-    const result = await mongoDb.collection("test_docs").insertOne(doc);
-    res.status(201).json({ doc: { _id: result.insertedId, ...doc } });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete("/mongodb/docs/:id", async (req, res) => {
-  if (!mongoDb)
-    return res.status(503).json({ error: "MongoDB not connected" });
-  try {
-    const { ObjectId } = await import("mongodb");
-    const result = await mongoDb
-      .collection("test_docs")
-      .deleteOne({ _id: new ObjectId(req.params.id) });
-    if (result.deletedCount === 0)
-      return res.status(404).json({ error: "Document not found" });
-    res.json({ deleted: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/mongodb/stats", async (_req, res) => {
-  if (!mongoDb)
-    return res.status(503).json({ error: "MongoDB not connected" });
-  try {
-    const count = await mongoDb.collection("test_docs").countDocuments();
-    const dbStats = await mongoDb.command({ dbStats: 1 });
+    const queueInfo = await rabbitmqChannel.assertQueue(RABBITMQ_QUEUE, {
+      durable: true,
+    });
     res.json({
-      docCount: count,
-      collections: dbStats.collections,
-      dataSize: dbStats.dataSize,
+      sent,
+      queue: RABBITMQ_QUEUE,
+      messageCount: queueInfo.messageCount,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/rabbitmq/consume", async (_req, res) => {
+  if (!rabbitmqChannel)
+    return res.status(503).json({ error: "RabbitMQ not connected" });
+  try {
+    const msg = await rabbitmqChannel.get(RABBITMQ_QUEUE, { noAck: false });
+    if (!msg) return res.json({ message: null, queue: RABBITMQ_QUEUE });
+    rabbitmqChannel.ack(msg);
+    const content = JSON.parse(msg.content.toString());
+    const queueInfo = await rabbitmqChannel.assertQueue(RABBITMQ_QUEUE, {
+      durable: true,
+    });
+    res.json({
+      message: content,
+      queue: RABBITMQ_QUEUE,
+      remaining: queueInfo.messageCount,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/rabbitmq/info", async (_req, res) => {
+  if (!rabbitmqChannel)
+    return res.status(503).json({ error: "RabbitMQ not connected" });
+  try {
+    const queueInfo = await rabbitmqChannel.assertQueue(RABBITMQ_QUEUE, {
+      durable: true,
+    });
+    res.json({
+      queue: RABBITMQ_QUEUE,
+      messageCount: queueInfo.messageCount,
+      consumerCount: queueInfo.consumerCount,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -242,57 +207,143 @@ app.get("/mongodb/stats", async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Valkey endpoints (Redis-compatible)
+// Meilisearch endpoints
 // ---------------------------------------------------------------------------
 
-app.get("/valkey/get/:key", async (req, res) => {
-  if (!valkeyClient)
-    return res.status(503).json({ error: "Valkey not connected" });
+app.get("/meilisearch/docs", async (_req, res) => {
+  if (!meiliClient)
+    return res.status(503).json({ error: "Meilisearch not connected" });
   try {
-    const value = await valkeyClient.get(req.params.key);
-    if (value === null) return res.status(404).json({ error: "Key not found" });
-    res.json({ key: req.params.key, value });
+    const index = meiliClient.index(MEILI_INDEX);
+    const result = await index.getDocuments({ limit: 50 });
+    res.json({ docs: result.results, total: result.total });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/valkey/set", async (req, res) => {
-  if (!valkeyClient)
-    return res.status(503).json({ error: "Valkey not connected" });
-  const { key, value, ttl } = req.body;
-  if (!key || value === undefined)
-    return res.status(400).json({ error: "key and value required" });
+app.post("/meilisearch/docs", async (req, res) => {
+  if (!meiliClient)
+    return res.status(503).json({ error: "Meilisearch not connected" });
+  const { title, content } = req.body;
+  if (!title) return res.status(400).json({ error: "title is required" });
   try {
-    if (ttl) {
-      await valkeyClient.set(key, value, "EX", Number(ttl));
-    } else {
-      await valkeyClient.set(key, value);
-    }
-    res.json({ key, value, ttl: ttl ?? null });
+    const index = meiliClient.index(MEILI_INDEX);
+    const doc = { id: Date.now(), title, content: content ?? null };
+    const task = await index.addDocuments([doc]);
+    res.status(201).json({ doc, taskUid: task.taskUid });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/valkey/incr/:key", async (req, res) => {
-  if (!valkeyClient)
-    return res.status(503).json({ error: "Valkey not connected" });
+app.get("/meilisearch/search", async (req, res) => {
+  if (!meiliClient)
+    return res.status(503).json({ error: "Meilisearch not connected" });
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ error: "q query param required" });
   try {
-    const value = await valkeyClient.incr(req.params.key);
-    res.json({ key: req.params.key, value });
+    const index = meiliClient.index(MEILI_INDEX);
+    const result = await index.search(String(q));
+    res.json({ hits: result.hits, processingTimeMs: result.processingTimeMs });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/valkey/info", async (_req, res) => {
-  if (!valkeyClient)
-    return res.status(503).json({ error: "Valkey not connected" });
+app.get("/meilisearch/stats", async (_req, res) => {
+  if (!meiliClient)
+    return res.status(503).json({ error: "Meilisearch not connected" });
   try {
-    const info = await valkeyClient.info();
-    const dbsize = await valkeyClient.dbsize();
-    res.json({ dbsize, info: info.substring(0, 500) });
+    const index = meiliClient.index(MEILI_INDEX);
+    const stats = await index.getStats();
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// MinIO endpoints
+// ---------------------------------------------------------------------------
+
+app.get("/minio/objects", async (_req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  try {
+    const objects = [];
+    await new Promise((resolve, reject) => {
+      const stream = minioClient.listObjects(MINIO_BUCKET, "", false);
+      stream.on("data", (obj) => objects.push(obj));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    res.json({ objects, bucket: MINIO_BUCKET });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/minio/upload", async (req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  const { name, content } = req.body;
+  if (!name) return res.status(400).json({ error: "name is required" });
+  try {
+    const data = content ?? `test-content-${Date.now()}`;
+    const buf = Buffer.from(data);
+    await minioClient.putObject(MINIO_BUCKET, name, buf, buf.length, {
+      "content-type": "text/plain",
+    });
+    res.status(201).json({ bucket: MINIO_BUCKET, name, size: buf.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/minio/download/:name", async (req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  try {
+    const stream = await minioClient.getObject(MINIO_BUCKET, req.params.name);
+    const chunks = [];
+    await new Promise((resolve, reject) => {
+      stream.on("data", (chunk) => chunks.push(chunk));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    const content = Buffer.concat(chunks).toString();
+    res.json({ name: req.params.name, content });
+  } catch (err) {
+    if (err.code === "NoSuchKey") return res.status(404).json({ error: "Object not found" });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/minio/objects/:name", async (req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  try {
+    await minioClient.removeObject(MINIO_BUCKET, req.params.name);
+    res.json({ deleted: true, name: req.params.name });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/minio/stats", async (_req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  try {
+    const objects = [];
+    await new Promise((resolve, reject) => {
+      const stream = minioClient.listObjects(MINIO_BUCKET, "", false);
+      stream.on("data", (obj) => objects.push(obj));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    const totalSize = objects.reduce((sum, o) => sum + (o.size ?? 0), 0);
+    res.json({ bucket: MINIO_BUCKET, objectCount: objects.length, totalSize });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -303,45 +354,47 @@ app.get("/valkey/info", async (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/test/all", async (_req, res) => {
-  const results = { mysql: null, mongodb: null, valkey: null };
+  const results = { rabbitmq: null, meilisearch: null, minio: null };
 
-  if (mysqlPool) {
+  if (rabbitmqChannel) {
     try {
-      const [result] = await mysqlPool.execute(
-        "INSERT INTO test_items (name, value) VALUES (?, ?)",
-        ["test-all", `combined-test-${Date.now()}`],
+      const sent = rabbitmqChannel.sendToQueue(
+        RABBITMQ_QUEUE,
+        Buffer.from(JSON.stringify({ message: "test-all", ts: Date.now() })),
+        { persistent: true },
       );
-      results.mysql = { ok: true, insertId: result.insertId };
+      results.rabbitmq = { ok: true, sent };
     } catch (err) {
-      results.mysql = { ok: false, error: err.message };
+      results.rabbitmq = { ok: false, error: err.message };
     }
   } else {
-    results.mysql = { ok: false, error: "not connected" };
+    results.rabbitmq = { ok: false, error: "not connected" };
   }
 
-  if (mongoDb) {
+  if (meiliClient) {
     try {
-      const doc = { name: "test-all", data: `combined-test-${Date.now()}`, createdAt: new Date() };
-      const r = await mongoDb.collection("test_docs").insertOne(doc);
-      results.mongodb = { ok: true, insertedId: r.insertedId.toString() };
+      const index = meiliClient.index(MEILI_INDEX);
+      const doc = { id: Date.now(), title: "test-all", content: `ts-${Date.now()}` };
+      const task = await index.addDocuments([doc]);
+      results.meilisearch = { ok: true, taskUid: task.taskUid };
     } catch (err) {
-      results.mongodb = { ok: false, error: err.message };
+      results.meilisearch = { ok: false, error: err.message };
     }
   } else {
-    results.mongodb = { ok: false, error: "not connected" };
+    results.meilisearch = { ok: false, error: "not connected" };
   }
 
-  if (valkeyClient) {
+  if (minioClient) {
     try {
-      const key = `test:all:${Date.now()}`;
-      await valkeyClient.set(key, `value-${Date.now()}`);
-      const value = await valkeyClient.get(key);
-      results.valkey = { ok: true, key, value };
+      const name = `test-all-${Date.now()}.txt`;
+      const data = Buffer.from(`combined-test-${Date.now()}`);
+      await minioClient.putObject(MINIO_BUCKET, name, data, data.length);
+      results.minio = { ok: true, name, bucket: MINIO_BUCKET };
     } catch (err) {
-      results.valkey = { ok: false, error: err.message };
+      results.minio = { ok: false, error: err.message };
     }
   } else {
-    results.valkey = { ok: false, error: "not connected" };
+    results.minio = { ok: false, error: "not connected" };
   }
 
   res.json(results);
@@ -353,15 +406,13 @@ app.post("/test/all", async (_req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`[server] Listening on port ${PORT}`);
-  initMySQL();
-  initMongoDB();
-  initValkey();
+  initRabbitMQ();
+  initMeilisearch();
+  initMinio();
 });
 
 process.on("SIGTERM", () => {
   console.log("[server] SIGTERM received, shutting down");
   server.close();
-  if (mysqlPool) mysqlPool.end();
-  if (mongoClient) mongoClient.close();
-  if (valkeyClient) valkeyClient.quit();
+  if (rabbitmqConnection) rabbitmqConnection.close();
 });
