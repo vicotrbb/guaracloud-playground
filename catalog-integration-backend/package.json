@@ -1,17 +1,16 @@
 {
   "name": "catalog-integration-backend",
   "version": "1.0.0",
-  "description": "Integration test backend for Guara Cloud catalog services (RabbitMQ, Meilisearch, Memcached)",
+  "description": "Integration test backend for Guara Cloud catalog services (Qdrant, Mailpit)",
   "type": "module",
   "scripts": {
     "start": "node src/server.js"
   },
   "dependencies": {
-    "amqplib": "^0.10.4",
+    "@qdrant/js-client-rest": "^1.13.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
-    "meilisearch": "^0.44.0",
-    "memjs": "^1.3.2"
+    "nodemailer": "^6.9.16"
   },
   "engines": {
     "node": ">=20"

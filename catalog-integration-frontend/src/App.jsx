@@ -14,24 +14,19 @@ function StatusBadge({ connected, error }) {
 export default function App() {
   const [status, setStatus] = useState(null);
 
-  // RabbitMQ
-  const [rmqMessage, setRmqMessage] = useState("");
-  const [rmqInfo, setRmqInfo] = useState(null);
-  const [rmqConsumed, setRmqConsumed] = useState(null);
+  // Qdrant
+  const [qdrantPayload, setQdrantPayload] = useState("");
+  const [qdrantPoints, setQdrantPoints] = useState([]);
+  const [qdrantInfo, setQdrantInfo] = useState(null);
+  const [qdrantSearch, setQdrantSearch] = useState(null);
 
-  // Meilisearch
-  const [meiliTitle, setMeiliTitle] = useState("");
-  const [meiliContent, setMeiliContent] = useState("");
-  const [meiliDocs, setMeiliDocs] = useState([]);
-  const [meiliQuery, setMeiliQuery] = useState("");
-  const [meiliHits, setMeiliHits] = useState(null);
-  const [meiliStats, setMeiliStats] = useState(null);
-
-  // Memcached
-  const [mcKey, setMcKey] = useState("");
-  const [mcValue, setMcValue] = useState("");
-  const [mcResult, setMcResult] = useState(null);
-  const [mcStats, setMcStats] = useState(null);
+  // Mailpit
+  const [mailTo, setMailTo] = useState("user@test.local");
+  const [mailSubject, setMailSubject] = useState("");
+  const [mailText, setMailText] = useState("");
+  const [mailResult, setMailResult] = useState(null);
+  const [mailMessages, setMailMessages] = useState([]);
+  const [mailInfo, setMailInfo] = useState(null);
 
   const [logs, setLogs] = useState([]);
 
@@ -77,118 +72,93 @@ export default function App() {
     const data = await api("/test/all", { method: "POST" });
     if (data) {
       addLog(
-        `Test all: RabbitMQ=${data.rabbitmq?.ok} Meilisearch=${data.meilisearch?.ok} Memcached=${data.memcached?.ok}`,
+        `Test all: Qdrant=${data.qdrant?.ok} Mailpit=${data.mailpit?.ok}`,
       );
     }
   };
 
-  // --- RabbitMQ ---
-  const publishRmq = async () => {
-    if (!rmqMessage.trim()) return;
-    const data = await api("/rabbitmq/publish", {
+  // --- Qdrant ---
+  const insertQdrant = async () => {
+    if (!qdrantPayload.trim()) return;
+    let payload;
+    try {
+      payload = JSON.parse(qdrantPayload);
+    } catch {
+      payload = { text: qdrantPayload };
+    }
+    const data = await api("/qdrant/points", {
       method: "POST",
-      body: JSON.stringify({ message: rmqMessage }),
+      body: JSON.stringify({ payload }),
     });
     if (data) {
-      addLog(`RabbitMQ published: ${rmqMessage} (queue: ${data.messageCount} msgs)`);
-      setRmqMessage("");
-      fetchRmqInfo();
+      addLog(`Qdrant inserted point id=${data.id}`);
+      setQdrantPayload("");
+      fetchQdrantPoints();
     }
   };
 
-  const consumeRmq = async () => {
-    const data = await api("/rabbitmq/consume");
+  const fetchQdrantPoints = async () => {
+    const data = await api("/qdrant/points");
+    if (data?.points) {
+      setQdrantPoints(data.points);
+      addLog(`Qdrant: ${data.points.length} points`);
+    }
+  };
+
+  const fetchQdrantInfo = async () => {
+    const data = await api("/qdrant/info");
     if (data) {
-      addLog(`RabbitMQ consumed: ${JSON.stringify(data.message)} (remaining: ${data.remaining})`);
-      setRmqConsumed(data);
-      fetchRmqInfo();
+      setQdrantInfo(data);
+      addLog(`Qdrant info: ${data.info?.points_count ?? "?"} points total`);
     }
   };
 
-  const fetchRmqInfo = async () => {
-    const data = await api("/rabbitmq/info");
-    if (data) {
-      setRmqInfo(data);
-      addLog(`RabbitMQ info: ${data.messageCount} messages in queue`);
-    }
-  };
-
-  // --- Meilisearch ---
-  const addMeiliDoc = async () => {
-    if (!meiliTitle.trim()) return;
-    const data = await api("/meilisearch/docs", {
+  const searchQdrant = async () => {
+    // Search with a random vector for testing
+    const vector = Array.from({ length: 4 }, () => Math.random() * 2 - 1);
+    const data = await api("/qdrant/search", {
       method: "POST",
-      body: JSON.stringify({ title: meiliTitle, content: meiliContent || null }),
+      body: JSON.stringify({ vector, limit: 5 }),
     });
     if (data) {
-      addLog(`Meilisearch indexed: "${meiliTitle}" (task ${data.taskUid})`);
-      setMeiliTitle("");
-      setMeiliContent("");
-      fetchMeiliDocs();
+      setQdrantSearch(data);
+      addLog(`Qdrant search: ${data.results.length} results`);
     }
   };
 
-  const fetchMeiliDocs = async () => {
-    const data = await api("/meilisearch/docs");
-    if (data?.docs) {
-      setMeiliDocs(data.docs);
-      addLog(`Meilisearch: loaded ${data.docs.length} docs`);
-    }
-  };
-
-  const searchMeili = async () => {
-    if (!meiliQuery.trim()) return;
-    const data = await api(`/meilisearch/search?q=${encodeURIComponent(meiliQuery)}`);
-    if (data) {
-      setMeiliHits(data);
-      addLog(`Meilisearch search "${meiliQuery}": ${data.hits.length} hits (${data.processingTimeMs}ms)`);
-    }
-  };
-
-  const fetchMeiliStats = async () => {
-    const data = await api("/meilisearch/stats");
-    if (data) {
-      setMeiliStats(data);
-      addLog(`Meilisearch stats: ${data.numberOfDocuments} documents`);
-    }
-  };
-
-  // --- Memcached ---
-  const setMemcached = async () => {
-    if (!mcKey.trim() || !mcValue.trim()) return;
-    const data = await api("/memcached/set", {
+  // --- Mailpit ---
+  const sendMail = async () => {
+    if (!mailTo.trim() || !mailSubject.trim()) return;
+    const data = await api("/mailpit/send", {
       method: "POST",
-      body: JSON.stringify({ key: mcKey, value: mcValue }),
+      body: JSON.stringify({
+        to: mailTo,
+        subject: mailSubject,
+        text: mailText || mailSubject,
+      }),
     });
     if (data) {
-      addLog(`Memcached SET ${mcKey} = ${mcValue}`);
-      setMcResult(data);
+      addLog(`Mailpit sent: "${mailSubject}" → ${mailTo}`);
+      setMailSubject("");
+      setMailText("");
+      setMailResult(data);
+      fetchMailMessages();
     }
   };
 
-  const getMemcached = async () => {
-    if (!mcKey.trim()) return;
-    const data = await api(`/memcached/get/${encodeURIComponent(mcKey)}`);
-    if (data) {
-      addLog(`Memcached GET ${mcKey} = ${data.value ?? "nil"}`);
-      setMcResult(data);
+  const fetchMailMessages = async () => {
+    const data = await api("/mailpit/messages");
+    if (data?.messages) {
+      setMailMessages(data.messages);
+      addLog(`Mailpit: ${data.total} messages`);
     }
   };
 
-  const deleteMemcached = async () => {
-    if (!mcKey.trim()) return;
-    const data = await api(`/memcached/delete/${encodeURIComponent(mcKey)}`, { method: "DELETE" });
+  const fetchMailInfo = async () => {
+    const data = await api("/mailpit/info");
     if (data) {
-      addLog(`Memcached DEL ${mcKey}`);
-      setMcResult(data);
-    }
-  };
-
-  const fetchMemcachedStats = async () => {
-    const data = await api("/memcached/stats");
-    if (data) {
-      setMcStats(data);
-      addLog("Memcached stats fetched");
+      setMailInfo(data);
+      addLog("Mailpit info fetched");
     }
   };
 
@@ -202,30 +172,27 @@ export default function App() {
     <div className="container">
       <h1>Catalog Integration Test</h1>
       <p className="subtitle">
-        Testing RabbitMQ, Meilisearch, and Memcached catalog services on Guara Cloud
+        Testing Qdrant and Mailpit catalog services on Guara Cloud
       </p>
 
       <div className="status-grid">
         <div className="status-card">
-          <h3>RabbitMQ</h3>
+          <h3>Qdrant</h3>
           <StatusBadge
-            connected={status.services?.rabbitmq?.connected}
-            error={status.services?.rabbitmq?.error}
+            connected={status.services?.qdrant?.connected}
+            error={status.services?.qdrant?.error}
           />
         </div>
         <div className="status-card">
-          <h3>Meilisearch</h3>
+          <h3>Mailpit</h3>
           <StatusBadge
-            connected={status.services?.meilisearch?.connected}
-            error={status.services?.meilisearch?.error}
+            connected={status.services?.mailpit?.connected}
+            error={status.services?.mailpit?.error}
           />
         </div>
         <div className="status-card">
-          <h3>Memcached</h3>
-          <StatusBadge
-            connected={status.services?.memcached?.connected}
-            error={status.services?.memcached?.error}
-          />
+          <h3>Backend</h3>
+          <StatusBadge connected={true} error={null} />
         </div>
       </div>
 
@@ -239,101 +206,74 @@ export default function App() {
         </button>
       </div>
 
-      {/* RabbitMQ */}
+      {/* Qdrant */}
       <div className="section">
-        <h2>RabbitMQ - Queue</h2>
+        <h2>Qdrant - Vector Database</h2>
         <div className="row">
           <input
-            placeholder="Message"
-            value={rmqMessage}
-            onChange={(e) => setRmqMessage(e.target.value)}
+            placeholder='Payload (JSON or text, e.g. {"name":"test"})'
+            value={qdrantPayload}
+            onChange={(e) => setQdrantPayload(e.target.value)}
+            style={{ width: "250px" }}
           />
-          <button className="btn btn-success" onClick={publishRmq}>
-            Publish
+          <button className="btn btn-success" onClick={insertQdrant}>
+            Insert
           </button>
-          <button className="btn btn-primary" onClick={consumeRmq}>
-            Consume 1
+          <button className="btn btn-primary" onClick={fetchQdrantPoints}>
+            List Points
           </button>
-          <button className="btn btn-primary" onClick={fetchRmqInfo}>
-            Queue Info
+          <button className="btn btn-primary" onClick={searchQdrant}>
+            Random Search
+          </button>
+          <button className="btn btn-primary" onClick={fetchQdrantInfo}>
+            Collection Info
           </button>
         </div>
-        {rmqInfo && <pre>{JSON.stringify(rmqInfo, null, 2)}</pre>}
-        {rmqConsumed && (
-          <pre>{JSON.stringify(rmqConsumed, null, 2)}</pre>
+        {qdrantInfo && (
+          <pre>{JSON.stringify(qdrantInfo.info, null, 2)}</pre>
+        )}
+        {qdrantSearch && (
+          <pre>{JSON.stringify(qdrantSearch.results, null, 2)}</pre>
+        )}
+        {qdrantPoints.length > 0 && (
+          <pre>{JSON.stringify(qdrantPoints.slice(0, 5), null, 2)}</pre>
         )}
       </div>
 
-      {/* Meilisearch */}
+      {/* Mailpit */}
       <div className="section">
-        <h2>Meilisearch - Full-text Search</h2>
+        <h2>Mailpit - Email Testing</h2>
         <div className="row">
           <input
-            placeholder="Title"
-            value={meiliTitle}
-            onChange={(e) => setMeiliTitle(e.target.value)}
+            placeholder="To"
+            value={mailTo}
+            onChange={(e) => setMailTo(e.target.value)}
           />
           <input
-            placeholder="Content (optional)"
-            value={meiliContent}
-            onChange={(e) => setMeiliContent(e.target.value)}
+            placeholder="Subject"
+            value={mailSubject}
+            onChange={(e) => setMailSubject(e.target.value)}
           />
-          <button className="btn btn-success" onClick={addMeiliDoc}>
-            Index Doc
-          </button>
-          <button className="btn btn-primary" onClick={fetchMeiliDocs}>
-            List Docs
-          </button>
-          <button className="btn btn-primary" onClick={fetchMeiliStats}>
-            Stats
-          </button>
-        </div>
-        <div className="row" style={{ marginTop: "0.5rem" }}>
           <input
-            placeholder="Search query"
-            value={meiliQuery}
-            onChange={(e) => setMeiliQuery(e.target.value)}
+            placeholder="Body (optional)"
+            value={mailText}
+            onChange={(e) => setMailText(e.target.value)}
           />
-          <button className="btn btn-primary" onClick={searchMeili}>
-            Search
+          <button className="btn btn-success" onClick={sendMail}>
+            Send
+          </button>
+          <button className="btn btn-primary" onClick={fetchMailMessages}>
+            List Messages
+          </button>
+          <button className="btn btn-primary" onClick={fetchMailInfo}>
+            Info
           </button>
         </div>
-        {meiliStats && <pre>{JSON.stringify(meiliStats, null, 2)}</pre>}
-        {meiliHits && <pre>{JSON.stringify(meiliHits, null, 2)}</pre>}
-        {meiliDocs.length > 0 && (
-          <pre>{JSON.stringify(meiliDocs, null, 2)}</pre>
+        {mailInfo && <pre>{JSON.stringify(mailInfo, null, 2)}</pre>}
+        {mailResult && <pre>{JSON.stringify(mailResult, null, 2)}</pre>}
+        {mailMessages.length > 0 && (
+          <pre>{JSON.stringify(mailMessages, null, 2)}</pre>
         )}
-      </div>
-
-      {/* Memcached */}
-      <div className="section">
-        <h2>Memcached - Cache</h2>
-        <div className="row">
-          <input
-            placeholder="Key"
-            value={mcKey}
-            onChange={(e) => setMcKey(e.target.value)}
-          />
-          <input
-            placeholder="Value"
-            value={mcValue}
-            onChange={(e) => setMcValue(e.target.value)}
-          />
-          <button className="btn btn-success" onClick={setMemcached}>
-            SET
-          </button>
-          <button className="btn btn-primary" onClick={getMemcached}>
-            GET
-          </button>
-          <button className="btn btn-danger" onClick={deleteMemcached}>
-            DEL
-          </button>
-          <button className="btn btn-primary" onClick={fetchMemcachedStats}>
-            Stats
-          </button>
-        </div>
-        {mcResult && <pre>{JSON.stringify(mcResult, null, 2)}</pre>}
-        {mcStats && <pre>{JSON.stringify(mcStats, null, 2)}</pre>}
       </div>
 
       <div className="section">
