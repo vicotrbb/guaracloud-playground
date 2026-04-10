@@ -23,7 +23,9 @@ let natsSubscription = null;
 const receivedMessages = [];
 
 async function initPostgres() {
-  const connectionString = process.env.POSTGRES_URL;
+  // Support both direct env vars and GuaraCloud auto-injected CATALOG_* vars
+  const connectionString =
+    process.env.POSTGRES_URL || process.env.CATALOG_POSTGRES_URL;
   if (!connectionString) {
     state.pg.error = "POSTGRES_URL not set";
     console.error("[postgres] POSTGRES_URL env var not found");
@@ -49,7 +51,8 @@ async function initPostgres() {
 }
 
 async function initRedis() {
-  const url = process.env.REDIS_URL;
+  // Support both direct env vars and GuaraCloud auto-injected CATALOG_* vars
+  const url = process.env.REDIS_URL || process.env.CATALOG_REDIS_URL;
   if (!url) {
     state.redis.error = "REDIS_URL not set";
     console.error("[redis] REDIS_URL env var not found");
@@ -68,19 +71,24 @@ async function initRedis() {
 }
 
 async function initNats() {
-  const host = process.env.NATS_HOST;
-  const port = process.env.NATS_PORT || "4222";
+  // Support both direct env vars and GuaraCloud auto-injected CATALOG_* vars.
+  // GuaraCloud only injects the full CATALOG_NATS_URL (not user/pass separately),
+  // so prefer URL-based connection when individual vars are not available.
+  const natsUrl =
+    process.env.NATS_URL || process.env.CATALOG_NATS_URL;
+  const host = process.env.NATS_HOST || process.env.CATALOG_NATS_HOST;
+  const port = process.env.NATS_PORT || process.env.CATALOG_NATS_PORT || "4222";
   const user = process.env.NATS_USER;
   const pass = process.env.NATS_PASSWORD;
 
-  if (!host) {
-    state.nats.error = "NATS_HOST not set";
-    console.error("[nats] NATS_HOST env var not found");
+  if (!natsUrl && !host) {
+    state.nats.error = "NATS_URL or NATS_HOST not set";
+    console.error("[nats] NATS_URL / NATS_HOST env var not found");
     return;
   }
 
   try {
-    const servers = `nats://${host}:${port}`;
+    const servers = natsUrl || `nats://${host}:${port}`;
     nc = await connect({
       servers,
       user: user || undefined,
