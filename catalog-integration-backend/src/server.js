@@ -1,10 +1,10 @@
 import cors from "cors";
 import express from "express";
-import { createPool } from "mysql2/promise";
-import { QdrantClient } from "@qdrant/js-client-rest";
-import nodemailer from "nodemailer";
-import { Client as MinioClient } from "minio";
+import pg from "pg";
+import Redis from "ioredis";
+import { connect as natsConnect, StringCodec } from "nats";
 
+const { Pool } = pg;
 const app = express();
 const PORT = process.env.PORT || 8080;
 
@@ -12,182 +12,127 @@ app.use(cors());
 app.use(express.json());
 
 const state = {
-  mysql: { connected: false, error: null },
-  qdrant: { connected: false, error: null },
-  mailpit: { connected: false, error: null },
-  minio: { connected: false, error: null },
+  postgres: { connected: false, error: null },
+  redis: { connected: false, error: null },
+  nats: { connected: false, error: null },
 };
 
-let mysqlPool = null;
-let qdrantClient = null;
-let mailTransporter = null;
-let mailpitHost = null;
-let mailpitPort = null;
-let mailpitWebUrl = null;
-let minioClient = null;
+let pgPool = null;
+let redisClient = null;
+let natsConnection = null;
+const sc = StringCodec();
 
-const QDRANT_COLLECTION = "test-collection";
-const VECTOR_SIZE = 4;
-const MYSQL_TABLE = "catalog_test";
-const MINIO_BUCKET = "test-bucket";
+const PG_TABLE = "catalog_test";
+const NATS_SUBJECT = "catalog.test";
 
 // ---------------------------------------------------------------------------
-// MySQL
+// Postgres
 // ---------------------------------------------------------------------------
 
-async function initMysql() {
-  const host = process.env.MYSQL_HOST || process.env.CATALOG_MYSQL_HOST;
-  const port = process.env.MYSQL_PORT || process.env.CATALOG_MYSQL_PORT || "3306";
-  const user = process.env.MYSQL_USER || process.env.CATALOG_MYSQL_USER || "root";
-  const password = process.env.MYSQL_PASSWORD || process.env.CATALOG_MYSQL_PASSWORD;
-  const database = process.env.MYSQL_DATABASE || process.env.CATALOG_MYSQL_DATABASE;
+async function initPostgres() {
+  const url = process.env.POSTGRES_URL;
+  const host = process.env.POSTGRES_HOST;
+  const port = process.env.POSTGRES_PORT || "5432";
+  const user = process.env.POSTGRES_USER;
+  const password = process.env.POSTGRES_PASSWORD;
+  const database = process.env.POSTGRES_DATABASE;
 
-  if (!host) {
-    state.mysql.error = "MYSQL_HOST not set";
-    console.error("[mysql] MYSQL_HOST env var not found");
+  if (!host && !url) {
+    state.postgres.error = "POSTGRES_HOST not set";
+    console.error("[postgres] POSTGRES_HOST env var not found");
     return;
   }
+
   try {
-    mysqlPool = createPool({
-      host,
-      port: Number(port),
-      user,
-      password,
-      database,
-      waitForConnections: true,
-      connectionLimit: 5,
-    });
+    pgPool = new Pool(
+      url
+        ? { connectionString: url }
+        : { host, port: Number(port), user, password, database, max: 5 },
+    );
 
-    const conn = await mysqlPool.getConnection();
-    await conn.ping();
-    conn.release();
+    // Health check
+    await pgPool.query("SELECT 1");
 
-    await mysqlPool.execute(`
-      CREATE TABLE IF NOT EXISTS ${MYSQL_TABLE} (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+    // Ensure test table exists
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS ${PG_TABLE} (
+        id SERIAL PRIMARY KEY,
         payload TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
 
-    state.mysql.connected = true;
-    console.log("[mysql] Connected, table ready:", MYSQL_TABLE);
+    state.postgres.connected = true;
+    console.log("[postgres] Connected, table ready:", PG_TABLE);
   } catch (err) {
-    state.mysql.error = err.message;
-    console.error("[mysql] Connection failed:", err.message);
+    state.postgres.error = err.message;
+    console.error("[postgres] Connection failed:", err.message);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Qdrant
+// Redis
 // ---------------------------------------------------------------------------
 
-async function initQdrant() {
-  const url = process.env.QDRANT_URL || process.env.CATALOG_QDRANT_URL;
-  const apiKey =
-    process.env.QDRANT_API_KEY || process.env.CATALOG_QDRANT_API_KEY;
-  if (!url) {
-    state.qdrant.error = "QDRANT_URL not set";
-    console.error("[qdrant] QDRANT_URL env var not found");
+async function initRedis() {
+  const url = process.env.REDIS_URL;
+  const host = process.env.REDIS_HOST;
+  const port = process.env.REDIS_PORT || "6379";
+  const password = process.env.REDIS_PASSWORD;
+
+  if (!host && !url) {
+    state.redis.error = "REDIS_HOST not set";
+    console.error("[redis] REDIS_HOST env var not found");
     return;
   }
+
   try {
-    qdrantClient = new QdrantClient({ url, apiKey: apiKey ?? undefined });
-    await qdrantClient.getCollections();
-    const collections = await qdrantClient.getCollections();
-    const exists = collections.collections.some(
-      (c) => c.name === QDRANT_COLLECTION,
-    );
-    if (!exists) {
-      await qdrantClient.createCollection(QDRANT_COLLECTION, {
-        vectors: { size: VECTOR_SIZE, distance: "Cosine" },
-      });
-    }
-    state.qdrant.connected = true;
-    console.log("[qdrant] Connected, collection ready:", QDRANT_COLLECTION);
+    redisClient = url
+      ? new Redis(url)
+      : new Redis({ host, port: Number(port), password: password || undefined, lazyConnect: true });
+
+    await redisClient.connect().catch(() => {}); // lazyConnect no-op if already connected
+    await redisClient.ping();
+
+    state.redis.connected = true;
+    console.log("[redis] Connected:", url ?? `${host}:${port}`);
   } catch (err) {
-    state.qdrant.error = err.message;
-    console.error("[qdrant] Connection failed:", err.message);
+    state.redis.error = err.message;
+    console.error("[redis] Connection failed:", err.message);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Mailpit (SMTP)
+// NATS
 // ---------------------------------------------------------------------------
 
-async function initMailpit() {
-  mailpitHost =
-    process.env.MAILPIT_SMTP_HOST || process.env.CATALOG_MAILPIT_SMTP_HOST;
-  mailpitPort =
-    process.env.MAILPIT_SMTP_PORT || process.env.CATALOG_MAILPIT_SMTP_PORT;
-  mailpitWebUrl =
-    process.env.MAILPIT_WEB_URL || process.env.CATALOG_MAILPIT_WEB_URL;
+async function initNats() {
+  const url = process.env.NATS_URL;
+  const host = process.env.NATS_HOST;
+  const port = process.env.NATS_PORT || "4222";
+  const user = process.env.NATS_USER;
+  const password = process.env.NATS_PASSWORD;
 
-  if (!mailpitHost) {
-    state.mailpit.error = "MAILPIT_SMTP_HOST not set";
-    console.error("[mailpit] MAILPIT_SMTP_HOST env var not found");
-    return;
-  }
-  try {
-    mailTransporter = nodemailer.createTransport({
-      host: mailpitHost,
-      port: Number(mailpitPort ?? 1025),
-      secure: false,
-      ignoreTLS: true,
-    });
-    await mailTransporter.verify();
-    state.mailpit.connected = true;
-    console.log(
-      "[mailpit] SMTP connected:",
-      `${mailpitHost}:${mailpitPort ?? 1025}`,
-    );
-  } catch (err) {
-    state.mailpit.error = err.message;
-    console.error("[mailpit] Connection failed:", err.message);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// MinIO (S3-compatible object storage)
-// ---------------------------------------------------------------------------
-
-async function initMinio() {
-  const endpoint = process.env.MINIO_ENDPOINT || process.env.CATALOG_MINIO_ENDPOINT;
-  const accessKey = process.env.MINIO_ACCESS_KEY || process.env.CATALOG_MINIO_ACCESS_KEY;
-  const secretKey = process.env.MINIO_SECRET_KEY || process.env.CATALOG_MINIO_SECRET_KEY;
-
-  if (!endpoint) {
-    state.minio.error = "MINIO_ENDPOINT not set";
-    console.error("[minio] MINIO_ENDPOINT env var not found");
+  if (!host && !url) {
+    state.nats.error = "NATS_HOST not set";
+    console.error("[nats] NATS_HOST env var not found");
     return;
   }
 
-  const [endpointHost, portStr] = endpoint.split(":");
-  const port = portStr ? parseInt(portStr, 10) : 9000;
+  const servers = url ?? `nats://${host}:${port}`;
 
   try {
-    minioClient = new MinioClient({
-      endPoint: endpointHost,
-      port,
-      useSSL: false,
-      accessKey: accessKey ?? "",
-      secretKey: secretKey ?? "",
+    natsConnection = await natsConnect({
+      servers,
+      user: user || undefined,
+      pass: password || undefined,
     });
 
-    // Health check: list buckets
-    await minioClient.listBuckets();
-
-    // Ensure test bucket exists
-    const exists = await minioClient.bucketExists(MINIO_BUCKET);
-    if (!exists) {
-      await minioClient.makeBucket(MINIO_BUCKET);
-    }
-
-    state.minio.connected = true;
-    console.log("[minio] Connected, bucket ready:", MINIO_BUCKET);
+    state.nats.connected = true;
+    console.log("[nats] Connected:", servers);
   } catch (err) {
-    state.minio.error = err.message;
-    console.error("[minio] Connection failed:", err.message);
+    state.nats.error = err.message;
+    console.error("[nats] Connection failed:", err.message);
   }
 }
 
@@ -199,20 +144,16 @@ app.get("/", (_req, res) => {
   res.json({
     message: "Catalog Integration Backend",
     services: {
-      mysql: state.mysql,
-      qdrant: state.qdrant,
-      mailpit: state.mailpit,
-      minio: state.minio,
+      postgres: state.postgres,
+      redis: state.redis,
+      nats: state.nats,
     },
   });
 });
 
 app.get("/health", (_req, res) => {
   const allConnected =
-    state.mysql.connected &&
-    state.qdrant.connected &&
-    state.mailpit.connected &&
-    state.minio.connected;
+    state.postgres.connected && state.redis.connected && state.nats.connected;
   res.status(allConnected ? 200 : 503).json({
     status: allConnected ? "healthy" : "degraded",
     services: state,
@@ -220,240 +161,153 @@ app.get("/health", (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// MySQL endpoints
+// Postgres endpoints
 // ---------------------------------------------------------------------------
 
-app.post("/mysql/insert", async (req, res) => {
-  if (!mysqlPool)
-    return res.status(503).json({ error: "MySQL not connected" });
-  const { payload } = req.body;
-  if (!payload)
-    return res.status(400).json({ error: "payload is required" });
-  try {
-    const [result] = await mysqlPool.execute(
-      `INSERT INTO ${MYSQL_TABLE} (payload) VALUES (?)`,
-      [typeof payload === "string" ? payload : JSON.stringify(payload)],
-    );
-    res.status(201).json({ id: result.insertId, payload });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/mysql/rows", async (_req, res) => {
-  if (!mysqlPool)
-    return res.status(503).json({ error: "MySQL not connected" });
-  try {
-    const [rows] = await mysqlPool.execute(
-      `SELECT * FROM ${MYSQL_TABLE} ORDER BY id DESC LIMIT 20`,
-    );
-    res.json({ rows, table: MYSQL_TABLE });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/mysql/info", async (_req, res) => {
-  if (!mysqlPool)
-    return res.status(503).json({ error: "MySQL not connected" });
-  try {
-    const [[versionRow]] = await mysqlPool.execute("SELECT VERSION() as version");
-    const [[countRow]] = await mysqlPool.execute(
-      `SELECT COUNT(*) as count FROM ${MYSQL_TABLE}`,
-    );
-    res.json({
-      version: versionRow.version,
-      table: MYSQL_TABLE,
-      rowCount: countRow.count,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Qdrant endpoints
-// ---------------------------------------------------------------------------
-
-app.get("/qdrant/points", async (_req, res) => {
-  if (!qdrantClient)
-    return res.status(503).json({ error: "Qdrant not connected" });
-  try {
-    const result = await qdrantClient.scroll(QDRANT_COLLECTION, {
-      limit: 50,
-      with_payload: true,
-      with_vector: false,
-    });
-    res.json({ points: result.points, collection: QDRANT_COLLECTION });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/qdrant/points", async (req, res) => {
-  if (!qdrantClient)
-    return res.status(503).json({ error: "Qdrant not connected" });
+app.post("/postgres/insert", async (req, res) => {
+  if (!pgPool) return res.status(503).json({ error: "Postgres not connected" });
   const { payload } = req.body;
   if (!payload) return res.status(400).json({ error: "payload is required" });
   try {
-    const id = Date.now();
-    const vector = Array.from(
-      { length: VECTOR_SIZE },
-      () => Math.random() * 2 - 1,
+    const result = await pgPool.query(
+      `INSERT INTO ${PG_TABLE} (payload) VALUES ($1) RETURNING *`,
+      [typeof payload === "string" ? payload : JSON.stringify(payload)],
     );
-    await qdrantClient.upsert(QDRANT_COLLECTION, {
-      points: [{ id, vector, payload }],
-    });
-    res.status(201).json({ id, vector, payload, collection: QDRANT_COLLECTION });
+    res.status(201).json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/qdrant/search", async (req, res) => {
-  if (!qdrantClient)
-    return res.status(503).json({ error: "Qdrant not connected" });
-  const { vector, limit } = req.body;
-  if (!vector || !Array.isArray(vector))
-    return res.status(400).json({ error: "vector array required" });
+app.get("/postgres/rows", async (_req, res) => {
+  if (!pgPool) return res.status(503).json({ error: "Postgres not connected" });
   try {
-    const results = await qdrantClient.search(QDRANT_COLLECTION, {
-      vector,
-      limit: limit ?? 5,
-      with_payload: true,
-    });
-    res.json({ results, collection: QDRANT_COLLECTION });
+    const result = await pgPool.query(
+      `SELECT * FROM ${PG_TABLE} ORDER BY id DESC LIMIT 20`,
+    );
+    res.json({ rows: result.rows, table: PG_TABLE });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/qdrant/info", async (_req, res) => {
-  if (!qdrantClient)
-    return res.status(503).json({ error: "Qdrant not connected" });
+app.get("/postgres/info", async (_req, res) => {
+  if (!pgPool) return res.status(503).json({ error: "Postgres not connected" });
   try {
-    const info = await qdrantClient.getCollection(QDRANT_COLLECTION);
-    res.json({ collection: QDRANT_COLLECTION, info });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Mailpit endpoints
-// ---------------------------------------------------------------------------
-
-app.post("/mailpit/send", async (req, res) => {
-  if (!mailTransporter)
-    return res.status(503).json({ error: "Mailpit not connected" });
-  const { to, subject, text, html } = req.body;
-  if (!to || !subject)
-    return res.status(400).json({ error: "to and subject are required" });
-  try {
-    const info = await mailTransporter.sendMail({
-      from: "test@guaracloud.com",
-      to,
-      subject,
-      text: text ?? subject,
-      html: html ?? undefined,
-    });
+    const versionRes = await pgPool.query("SELECT version()");
+    const countRes = await pgPool.query(
+      `SELECT COUNT(*) as count FROM ${PG_TABLE}`,
+    );
     res.json({
-      messageId: info.messageId,
-      to,
-      subject,
-      webUrl: mailpitWebUrl,
+      version: versionRes.rows[0].version,
+      table: PG_TABLE,
+      rowCount: Number(countRes.rows[0].count),
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/mailpit/messages", async (_req, res) => {
-  if (!mailpitWebUrl)
-    return res.status(503).json({ error: "Mailpit not connected" });
-  try {
-    const apiUrl = `${mailpitWebUrl}/api/v1/messages`;
-    const resp = await fetch(apiUrl);
-    const data = await resp.json();
-    res.json({
-      total: data.total ?? 0,
-      messages: (data.messages ?? []).slice(0, 10).map((m) => ({
-        id: m.ID,
-        subject: m.Snippet,
-        from: m.From,
-        to: m.To,
-        created: m.Created,
-      })),
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/mailpit/info", async (_req, res) => {
-  if (!mailpitWebUrl)
-    return res.status(503).json({ error: "Mailpit not connected" });
-  try {
-    const resp = await fetch(`${mailpitWebUrl}/api/v1/info`);
-    const data = await resp.json();
-    res.json({ info: data, webUrl: mailpitWebUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // ---------------------------------------------------------------------------
-// MinIO endpoints
+// Redis endpoints
 // ---------------------------------------------------------------------------
 
-app.post("/minio/objects", async (req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
-  const { key, content } = req.body;
-  if (!key || !content)
-    return res.status(400).json({ error: "key and content are required" });
+app.post("/redis/set", async (req, res) => {
+  if (!redisClient) return res.status(503).json({ error: "Redis not connected" });
+  const { key, value, ttl } = req.body;
+  if (!key || value === undefined) return res.status(400).json({ error: "key and value are required" });
   try {
-    const body = typeof content === "string" ? content : JSON.stringify(content);
-    await minioClient.putObject(MINIO_BUCKET, key, body, body.length, {
-      "Content-Type": "text/plain",
-    });
-    res.status(201).json({ bucket: MINIO_BUCKET, key, size: body.length });
+    const val = typeof value === "string" ? value : JSON.stringify(value);
+    if (ttl) {
+      await redisClient.setex(key, ttl, val);
+    } else {
+      await redisClient.set(key, val);
+    }
+    res.status(201).json({ key, value: val, ttl: ttl ?? null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/minio/objects", async (_req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
+app.get("/redis/get/:key", async (req, res) => {
+  if (!redisClient) return res.status(503).json({ error: "Redis not connected" });
   try {
-    const objects = [];
-    await new Promise((resolve, reject) => {
-      const stream = minioClient.listObjects(MINIO_BUCKET, "", true);
-      stream.on("data", (obj) => objects.push({
-        key: obj.name,
-        size: obj.size,
-        lastModified: obj.lastModified,
-      }));
-      stream.on("end", resolve);
-      stream.on("error", reject);
-    });
-    res.json({ bucket: MINIO_BUCKET, objects });
+    const value = await redisClient.get(req.params.key);
+    if (value === null) return res.status(404).json({ error: "Key not found" });
+    res.json({ key: req.params.key, value });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/minio/info", async (_req, res) => {
-  if (!minioClient)
-    return res.status(503).json({ error: "MinIO not connected" });
+app.get("/redis/keys", async (_req, res) => {
+  if (!redisClient) return res.status(503).json({ error: "Redis not connected" });
   try {
-    const buckets = await minioClient.listBuckets();
-    const stat = await minioClient.statObject(MINIO_BUCKET, "").catch(() => null);
+    const keys = await redisClient.keys("catalog:*");
+    res.json({ keys });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/redis/info", async (_req, res) => {
+  if (!redisClient) return res.status(503).json({ error: "Redis not connected" });
+  try {
+    const info = await redisClient.info("server");
+    const lines = info.split("\r\n").filter((l) => l && !l.startsWith("#"));
+    const parsed = Object.fromEntries(
+      lines.map((l) => l.split(":")).filter((p) => p.length === 2),
+    );
+    res.json({ redis_version: parsed.redis_version, uptime_in_seconds: parsed.uptime_in_seconds });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// NATS endpoints
+// ---------------------------------------------------------------------------
+
+app.post("/nats/publish", async (req, res) => {
+  if (!natsConnection) return res.status(503).json({ error: "NATS not connected" });
+  const { subject, message } = req.body;
+  if (!subject || !message) return res.status(400).json({ error: "subject and message are required" });
+  try {
+    const payload = typeof message === "string" ? message : JSON.stringify(message);
+    natsConnection.publish(subject ?? NATS_SUBJECT, sc.encode(payload));
+    res.json({ subject: subject ?? NATS_SUBJECT, message: payload });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/nats/request", async (req, res) => {
+  if (!natsConnection) return res.status(503).json({ error: "NATS not connected" });
+  const { subject, message } = req.body;
+  if (!subject || !message) return res.status(400).json({ error: "subject and message are required" });
+  try {
+    const payload = typeof message === "string" ? message : JSON.stringify(message);
+    const reply = await natsConnection.request(
+      subject ?? NATS_SUBJECT,
+      sc.encode(payload),
+      { timeout: 2000 },
+    );
+    res.json({ subject: subject ?? NATS_SUBJECT, reply: sc.decode(reply.data) });
+  } catch (err) {
+    // Timeout is expected when no subscriber; still confirms publish works
+    res.json({ subject: subject ?? NATS_SUBJECT, note: "published (no reply — no subscriber)", error: err.message });
+  }
+});
+
+app.get("/nats/info", async (_req, res) => {
+  if (!natsConnection) return res.status(503).json({ error: "NATS not connected" });
+  try {
+    const info = natsConnection.info;
     res.json({
-      bucket: MINIO_BUCKET,
-      buckets: buckets.map((b) => ({ name: b.name, creationDate: b.creationDate })),
-      stat,
+      server_id: info?.server_id,
+      server_name: info?.server_name,
+      version: info?.version,
+      max_payload: info?.max_payload,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -465,72 +319,45 @@ app.get("/minio/info", async (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/test/all", async (_req, res) => {
-  const results = { mysql: null, qdrant: null, mailpit: null, minio: null };
+  const results = { postgres: null, redis: null, nats: null };
 
-  if (mysqlPool) {
+  if (pgPool) {
     try {
-      const [result] = await mysqlPool.execute(
-        `INSERT INTO ${MYSQL_TABLE} (payload) VALUES (?)`,
+      const ins = await pgPool.query(
+        `INSERT INTO ${PG_TABLE} (payload) VALUES ($1) RETURNING *`,
         [`test-all-${Date.now()}`],
       );
-      const [[row]] = await mysqlPool.execute(
-        `SELECT * FROM ${MYSQL_TABLE} WHERE id = ?`,
-        [result.insertId],
-      );
-      results.mysql = { ok: true, insertedId: result.insertId, row };
+      results.postgres = { ok: true, insertedId: ins.rows[0].id, payload: ins.rows[0].payload };
     } catch (err) {
-      results.mysql = { ok: false, error: err.message };
+      results.postgres = { ok: false, error: err.message };
     }
   } else {
-    results.mysql = { ok: false, error: "not connected" };
+    results.postgres = { ok: false, error: "not connected" };
   }
 
-  if (qdrantClient) {
+  if (redisClient) {
     try {
-      const id = Date.now();
-      const vector = Array.from(
-        { length: VECTOR_SIZE },
-        () => Math.random() * 2 - 1,
-      );
-      await qdrantClient.upsert(QDRANT_COLLECTION, {
-        points: [{ id, vector, payload: { source: "test-all", ts: id } }],
-      });
-      results.qdrant = { ok: true, insertedId: id };
+      const key = `catalog:test-all-${Date.now()}`;
+      await redisClient.setex(key, 60, "test-all-value");
+      const value = await redisClient.get(key);
+      results.redis = { ok: true, key, value };
     } catch (err) {
-      results.qdrant = { ok: false, error: err.message };
+      results.redis = { ok: false, error: err.message };
     }
   } else {
-    results.qdrant = { ok: false, error: "not connected" };
+    results.redis = { ok: false, error: "not connected" };
   }
 
-  if (mailTransporter) {
+  if (natsConnection) {
     try {
-      const info = await mailTransporter.sendMail({
-        from: "test@guaracloud.com",
-        to: "recipient@test.local",
-        subject: `Combined test ${Date.now()}`,
-        text: "Catalog integration test-all email",
-      });
-      results.mailpit = { ok: true, messageId: info.messageId };
+      const subject = `${NATS_SUBJECT}.test-all`;
+      natsConnection.publish(subject, sc.encode(`test-all-${Date.now()}`));
+      results.nats = { ok: true, published: subject };
     } catch (err) {
-      results.mailpit = { ok: false, error: err.message };
+      results.nats = { ok: false, error: err.message };
     }
   } else {
-    results.mailpit = { ok: false, error: "not connected" };
-  }
-
-  if (minioClient) {
-    try {
-      const key = `test-all-${Date.now()}.txt`;
-      const body = `catalog integration test ${Date.now()}`;
-      await minioClient.putObject(MINIO_BUCKET, key, body, body.length);
-      const stat = await minioClient.statObject(MINIO_BUCKET, key);
-      results.minio = { ok: true, key, size: stat.size };
-    } catch (err) {
-      results.minio = { ok: false, error: err.message };
-    }
-  } else {
-    results.minio = { ok: false, error: "not connected" };
+    results.nats = { ok: false, error: "not connected" };
   }
 
   res.json(results);
@@ -542,13 +369,13 @@ app.post("/test/all", async (_req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`[server] Listening on port ${PORT}`);
-  initMysql();
-  initQdrant();
-  initMailpit();
-  initMinio();
+  initPostgres();
+  initRedis();
+  initNats();
 });
 
-process.on("SIGTERM", () => {
+process.on("SIGTERM", async () => {
   console.log("[server] SIGTERM received, shutting down");
+  if (natsConnection) await natsConnection.drain();
   server.close();
 });

@@ -14,31 +14,25 @@ function StatusBadge({ connected, error }) {
 export default function App() {
   const [status, setStatus] = useState(null);
 
-  // MySQL
-  const [mysqlPayload, setMysqlPayload] = useState("");
-  const [mysqlRows, setMysqlRows] = useState([]);
-  const [mysqlInfo, setMysqlInfo] = useState(null);
+  // Postgres
+  const [pgPayload, setPgPayload] = useState("");
+  const [pgRows, setPgRows] = useState([]);
+  const [pgInfo, setPgInfo] = useState(null);
 
-  // Qdrant
-  const [qdrantPayload, setQdrantPayload] = useState("");
-  const [qdrantPoints, setQdrantPoints] = useState([]);
-  const [qdrantInfo, setQdrantInfo] = useState(null);
-  const [qdrantSearch, setQdrantSearch] = useState(null);
+  // Redis
+  const [redisKey, setRedisKey] = useState("catalog:hello");
+  const [redisValue, setRedisValue] = useState("");
+  const [redisTtl, setRedisTtl] = useState("60");
+  const [redisGetKey, setRedisGetKey] = useState("catalog:hello");
+  const [redisGetResult, setRedisGetResult] = useState(null);
+  const [redisKeys, setRedisKeys] = useState([]);
+  const [redisInfo, setRedisInfo] = useState(null);
 
-  // Mailpit
-  const [mailTo, setMailTo] = useState("user@test.local");
-  const [mailSubject, setMailSubject] = useState("");
-  const [mailText, setMailText] = useState("");
-  const [mailResult, setMailResult] = useState(null);
-  const [mailMessages, setMailMessages] = useState([]);
-  const [mailInfo, setMailInfo] = useState(null);
-
-  // MinIO
-  const [minioKey, setMinioKey] = useState("");
-  const [minioContent, setMinioContent] = useState("");
-  const [minioObjects, setMinioObjects] = useState([]);
-  const [minioInfo, setMinioInfo] = useState(null);
-  const [minioUploadResult, setMinioUploadResult] = useState(null);
+  // NATS
+  const [natsSubject, setNatsSubject] = useState("catalog.test");
+  const [natsMessage, setNatsMessage] = useState("");
+  const [natsPublishResult, setNatsPublishResult] = useState(null);
+  const [natsInfo, setNatsInfo] = useState(null);
 
   const [logs, setLogs] = useState([]);
 
@@ -84,154 +78,98 @@ export default function App() {
     const data = await api("/test/all", { method: "POST" });
     if (data) {
       addLog(
-        `Test all: MySQL=${data.mysql?.ok} Qdrant=${data.qdrant?.ok} Mailpit=${data.mailpit?.ok} MinIO=${data.minio?.ok}`,
+        `Test all: Postgres=${data.postgres?.ok} Redis=${data.redis?.ok} NATS=${data.nats?.ok}`,
       );
     }
   };
 
-  // --- MySQL ---
-  const insertMysql = async () => {
-    if (!mysqlPayload.trim()) return;
-    const data = await api("/mysql/insert", {
+  // --- Postgres ---
+  const insertPg = async () => {
+    if (!pgPayload.trim()) return;
+    const data = await api("/postgres/insert", {
       method: "POST",
-      body: JSON.stringify({ payload: mysqlPayload }),
+      body: JSON.stringify({ payload: pgPayload }),
     });
-    if (data) {
-      addLog(`MySQL inserted id=${data.id}`);
-      setMysqlPayload("");
-      fetchMysqlRows();
+    if (data?.id) {
+      addLog(`Postgres inserted id=${data.id}`);
+      setPgPayload("");
+      fetchPgRows();
     }
   };
 
-  const fetchMysqlRows = async () => {
-    const data = await api("/mysql/rows");
+  const fetchPgRows = async () => {
+    const data = await api("/postgres/rows");
     if (data?.rows) {
-      setMysqlRows(data.rows);
-      addLog(`MySQL: ${data.rows.length} rows`);
+      setPgRows(data.rows);
+      addLog(`Postgres: ${data.rows.length} rows`);
     }
   };
 
-  const fetchMysqlInfo = async () => {
-    const data = await api("/mysql/info");
+  const fetchPgInfo = async () => {
+    const data = await api("/postgres/info");
     if (data) {
-      setMysqlInfo(data);
-      addLog(`MySQL version: ${data.version}, rows: ${data.rowCount}`);
+      setPgInfo(data);
+      addLog(`Postgres version: ${data.version?.split(" ")[1]}, rows: ${data.rowCount}`);
     }
   };
 
-  // --- Qdrant ---
-  const insertQdrant = async () => {
-    if (!qdrantPayload.trim()) return;
-    let payload;
-    try {
-      payload = JSON.parse(qdrantPayload);
-    } catch {
-      payload = { text: qdrantPayload };
-    }
-    const data = await api("/qdrant/points", {
+  // --- Redis ---
+  const redisSet = async () => {
+    if (!redisKey.trim() || !redisValue.trim()) return;
+    const data = await api("/redis/set", {
       method: "POST",
-      body: JSON.stringify({ payload }),
+      body: JSON.stringify({ key: redisKey, value: redisValue, ttl: Number(redisTtl) || undefined }),
+    });
+    if (data?.key) {
+      addLog(`Redis SET ${data.key} (ttl=${data.ttl}s)`);
+      setRedisValue("");
+    }
+  };
+
+  const redisGet = async () => {
+    if (!redisGetKey.trim()) return;
+    const data = await api(`/redis/get/${encodeURIComponent(redisGetKey)}`);
+    if (data) {
+      setRedisGetResult(data);
+      addLog(`Redis GET ${redisGetKey}: ${data.value ?? data.error}`);
+    }
+  };
+
+  const fetchRedisKeys = async () => {
+    const data = await api("/redis/keys");
+    if (data?.keys) {
+      setRedisKeys(data.keys);
+      addLog(`Redis: ${data.keys.length} catalog:* keys`);
+    }
+  };
+
+  const fetchRedisInfo = async () => {
+    const data = await api("/redis/info");
+    if (data) {
+      setRedisInfo(data);
+      addLog(`Redis version: ${data.redis_version}`);
+    }
+  };
+
+  // --- NATS ---
+  const natsPublish = async () => {
+    if (!natsSubject.trim() || !natsMessage.trim()) return;
+    const data = await api("/nats/publish", {
+      method: "POST",
+      body: JSON.stringify({ subject: natsSubject, message: natsMessage }),
     });
     if (data) {
-      addLog(`Qdrant inserted point id=${data.id}`);
-      setQdrantPayload("");
-      fetchQdrantPoints();
+      setNatsPublishResult(data);
+      addLog(`NATS published to ${data.subject}`);
+      setNatsMessage("");
     }
   };
 
-  const fetchQdrantPoints = async () => {
-    const data = await api("/qdrant/points");
-    if (data?.points) {
-      setQdrantPoints(data.points);
-      addLog(`Qdrant: ${data.points.length} points`);
-    }
-  };
-
-  const fetchQdrantInfo = async () => {
-    const data = await api("/qdrant/info");
+  const fetchNatsInfo = async () => {
+    const data = await api("/nats/info");
     if (data) {
-      setQdrantInfo(data);
-      addLog(`Qdrant info: ${data.info?.points_count ?? "?"} points total`);
-    }
-  };
-
-  const searchQdrant = async () => {
-    const vector = Array.from({ length: 4 }, () => Math.random() * 2 - 1);
-    const data = await api("/qdrant/search", {
-      method: "POST",
-      body: JSON.stringify({ vector, limit: 5 }),
-    });
-    if (data) {
-      setQdrantSearch(data);
-      addLog(`Qdrant search: ${data.results.length} results`);
-    }
-  };
-
-  // --- Mailpit ---
-  const sendMail = async () => {
-    if (!mailTo.trim() || !mailSubject.trim()) return;
-    const data = await api("/mailpit/send", {
-      method: "POST",
-      body: JSON.stringify({
-        to: mailTo,
-        subject: mailSubject,
-        text: mailText || mailSubject,
-      }),
-    });
-    if (data) {
-      addLog(`Mailpit sent: "${mailSubject}" → ${mailTo}`);
-      setMailSubject("");
-      setMailText("");
-      setMailResult(data);
-      fetchMailMessages();
-    }
-  };
-
-  const fetchMailMessages = async () => {
-    const data = await api("/mailpit/messages");
-    if (data?.messages) {
-      setMailMessages(data.messages);
-      addLog(`Mailpit: ${data.total} messages`);
-    }
-  };
-
-  const fetchMailInfo = async () => {
-    const data = await api("/mailpit/info");
-    if (data) {
-      setMailInfo(data);
-      addLog("Mailpit info fetched");
-    }
-  };
-
-  // --- MinIO ---
-  const uploadMinioObject = async () => {
-    if (!minioKey.trim() || !minioContent.trim()) return;
-    const data = await api("/minio/objects", {
-      method: "POST",
-      body: JSON.stringify({ key: minioKey, content: minioContent }),
-    });
-    if (data) {
-      addLog(`MinIO uploaded key=${data.key} size=${data.size}`);
-      setMinioKey("");
-      setMinioContent("");
-      setMinioUploadResult(data);
-      fetchMinioObjects();
-    }
-  };
-
-  const fetchMinioObjects = async () => {
-    const data = await api("/minio/objects");
-    if (data?.objects) {
-      setMinioObjects(data.objects);
-      addLog(`MinIO: ${data.objects.length} objects in bucket`);
-    }
-  };
-
-  const fetchMinioInfo = async () => {
-    const data = await api("/minio/info");
-    if (data) {
-      setMinioInfo(data);
-      addLog(`MinIO info: ${data.buckets?.length ?? "?"} buckets`);
+      setNatsInfo(data);
+      addLog(`NATS server: ${data.server_name} v${data.version}`);
     }
   };
 
@@ -245,36 +183,29 @@ export default function App() {
     <div className="container">
       <h1>Catalog Integration Test</h1>
       <p className="subtitle">
-        Testing MySQL, Qdrant, Mailpit, and MinIO catalog services on Guara Cloud
+        Testing Postgres, Redis, and NATS catalog services on Guara Cloud
       </p>
 
       <div className="status-grid">
         <div className="status-card">
-          <h3>MySQL</h3>
+          <h3>Postgres</h3>
           <StatusBadge
-            connected={status.services?.mysql?.connected}
-            error={status.services?.mysql?.error}
+            connected={status.services?.postgres?.connected}
+            error={status.services?.postgres?.error}
           />
         </div>
         <div className="status-card">
-          <h3>Qdrant</h3>
+          <h3>Redis</h3>
           <StatusBadge
-            connected={status.services?.qdrant?.connected}
-            error={status.services?.qdrant?.error}
+            connected={status.services?.redis?.connected}
+            error={status.services?.redis?.error}
           />
         </div>
         <div className="status-card">
-          <h3>Mailpit</h3>
+          <h3>NATS</h3>
           <StatusBadge
-            connected={status.services?.mailpit?.connected}
-            error={status.services?.mailpit?.error}
-          />
-        </div>
-        <div className="status-card">
-          <h3>MinIO</h3>
-          <StatusBadge
-            connected={status.services?.minio?.connected}
-            error={status.services?.minio?.error}
+            connected={status.services?.nats?.connected}
+            error={status.services?.nats?.error}
           />
         </div>
         <div className="status-card">
@@ -293,134 +224,106 @@ export default function App() {
         </button>
       </div>
 
-      {/* MySQL */}
+      {/* Postgres */}
       <div className="section">
-        <h2>MySQL - Relational Database</h2>
+        <h2>Postgres - Relational Database</h2>
         <div className="row">
           <input
             placeholder="Row payload text"
-            value={mysqlPayload}
-            onChange={(e) => setMysqlPayload(e.target.value)}
+            value={pgPayload}
+            onChange={(e) => setPgPayload(e.target.value)}
             style={{ width: "250px" }}
           />
-          <button className="btn btn-success" onClick={insertMysql}>
+          <button className="btn btn-success" onClick={insertPg}>
             Insert Row
           </button>
-          <button className="btn btn-primary" onClick={fetchMysqlRows}>
+          <button className="btn btn-primary" onClick={fetchPgRows}>
             List Rows
           </button>
-          <button className="btn btn-primary" onClick={fetchMysqlInfo}>
+          <button className="btn btn-primary" onClick={fetchPgInfo}>
             Server Info
           </button>
         </div>
-        {mysqlInfo && (
-          <pre>{JSON.stringify(mysqlInfo, null, 2)}</pre>
-        )}
-        {mysqlRows.length > 0 && (
-          <pre>{JSON.stringify(mysqlRows.slice(0, 10), null, 2)}</pre>
+        {pgInfo && <pre>{JSON.stringify(pgInfo, null, 2)}</pre>}
+        {pgRows.length > 0 && (
+          <pre>{JSON.stringify(pgRows.slice(0, 10), null, 2)}</pre>
         )}
       </div>
 
-      {/* Qdrant */}
+      {/* Redis */}
       <div className="section">
-        <h2>Qdrant - Vector Database</h2>
+        <h2>Redis - Key-Value Cache</h2>
         <div className="row">
           <input
-            placeholder='Payload (JSON or text, e.g. {"name":"test"})'
-            value={qdrantPayload}
-            onChange={(e) => setQdrantPayload(e.target.value)}
-            style={{ width: "250px" }}
+            placeholder="Key (e.g. catalog:hello)"
+            value={redisKey}
+            onChange={(e) => setRedisKey(e.target.value)}
+            style={{ width: "160px" }}
           />
-          <button className="btn btn-success" onClick={insertQdrant}>
-            Insert
-          </button>
-          <button className="btn btn-primary" onClick={fetchQdrantPoints}>
-            List Points
-          </button>
-          <button className="btn btn-primary" onClick={searchQdrant}>
-            Random Search
-          </button>
-          <button className="btn btn-primary" onClick={fetchQdrantInfo}>
-            Collection Info
+          <input
+            placeholder="Value"
+            value={redisValue}
+            onChange={(e) => setRedisValue(e.target.value)}
+            style={{ width: "160px" }}
+          />
+          <input
+            placeholder="TTL (s)"
+            value={redisTtl}
+            onChange={(e) => setRedisTtl(e.target.value)}
+            style={{ width: "70px" }}
+          />
+          <button className="btn btn-success" onClick={redisSet}>
+            SET
           </button>
         </div>
-        {qdrantInfo && (
-          <pre>{JSON.stringify(qdrantInfo.info, null, 2)}</pre>
-        )}
-        {qdrantSearch && (
-          <pre>{JSON.stringify(qdrantSearch.results, null, 2)}</pre>
-        )}
-        {qdrantPoints.length > 0 && (
-          <pre>{JSON.stringify(qdrantPoints.slice(0, 5), null, 2)}</pre>
-        )}
-      </div>
-
-      {/* Mailpit */}
-      <div className="section">
-        <h2>Mailpit - Email Testing</h2>
         <div className="row">
           <input
-            placeholder="To"
-            value={mailTo}
-            onChange={(e) => setMailTo(e.target.value)}
+            placeholder="Key to GET"
+            value={redisGetKey}
+            onChange={(e) => setRedisGetKey(e.target.value)}
+            style={{ width: "160px" }}
           />
+          <button className="btn btn-primary" onClick={redisGet}>
+            GET
+          </button>
+          <button className="btn btn-primary" onClick={fetchRedisKeys}>
+            List catalog:* Keys
+          </button>
+          <button className="btn btn-primary" onClick={fetchRedisInfo}>
+            Server Info
+          </button>
+        </div>
+        {redisInfo && <pre>{JSON.stringify(redisInfo, null, 2)}</pre>}
+        {redisGetResult && <pre>{JSON.stringify(redisGetResult, null, 2)}</pre>}
+        {redisKeys.length > 0 && <pre>{JSON.stringify(redisKeys, null, 2)}</pre>}
+      </div>
+
+      {/* NATS */}
+      <div className="section">
+        <h2>NATS - Messaging</h2>
+        <div className="row">
           <input
             placeholder="Subject"
-            value={mailSubject}
-            onChange={(e) => setMailSubject(e.target.value)}
+            value={natsSubject}
+            onChange={(e) => setNatsSubject(e.target.value)}
+            style={{ width: "160px" }}
           />
           <input
-            placeholder="Body (optional)"
-            value={mailText}
-            onChange={(e) => setMailText(e.target.value)}
-          />
-          <button className="btn btn-success" onClick={sendMail}>
-            Send
-          </button>
-          <button className="btn btn-primary" onClick={fetchMailMessages}>
-            List Messages
-          </button>
-          <button className="btn btn-primary" onClick={fetchMailInfo}>
-            Info
-          </button>
-        </div>
-        {mailInfo && <pre>{JSON.stringify(mailInfo, null, 2)}</pre>}
-        {mailResult && <pre>{JSON.stringify(mailResult, null, 2)}</pre>}
-        {mailMessages.length > 0 && (
-          <pre>{JSON.stringify(mailMessages, null, 2)}</pre>
-        )}
-      </div>
-
-      {/* MinIO */}
-      <div className="section">
-        <h2>MinIO - Object Storage</h2>
-        <div className="row">
-          <input
-            placeholder="Object key (e.g. test/file.txt)"
-            value={minioKey}
-            onChange={(e) => setMinioKey(e.target.value)}
+            placeholder="Message"
+            value={natsMessage}
+            onChange={(e) => setNatsMessage(e.target.value)}
             style={{ width: "200px" }}
           />
-          <input
-            placeholder="Content"
-            value={minioContent}
-            onChange={(e) => setMinioContent(e.target.value)}
-            style={{ width: "200px" }}
-          />
-          <button className="btn btn-success" onClick={uploadMinioObject}>
-            Upload
+          <button className="btn btn-success" onClick={natsPublish}>
+            Publish
           </button>
-          <button className="btn btn-primary" onClick={fetchMinioObjects}>
-            List Objects
-          </button>
-          <button className="btn btn-primary" onClick={fetchMinioInfo}>
-            Bucket Info
+          <button className="btn btn-primary" onClick={fetchNatsInfo}>
+            Server Info
           </button>
         </div>
-        {minioInfo && <pre>{JSON.stringify(minioInfo, null, 2)}</pre>}
-        {minioUploadResult && <pre>{JSON.stringify(minioUploadResult, null, 2)}</pre>}
-        {minioObjects.length > 0 && (
-          <pre>{JSON.stringify(minioObjects.slice(0, 10), null, 2)}</pre>
+        {natsInfo && <pre>{JSON.stringify(natsInfo, null, 2)}</pre>}
+        {natsPublishResult && (
+          <pre>{JSON.stringify(natsPublishResult, null, 2)}</pre>
         )}
       </div>
 
