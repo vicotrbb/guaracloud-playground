@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback } from "react";
 
 const API = import.meta.env.VITE_BACKEND_URL
   ? `${import.meta.env.VITE_BACKEND_URL.replace(/\/$/, "")}`
-  : "/api";
+  : "https://catalog-integration-backend-b18233-catalog-test-3.guaracloud.com";
 
 function StatusBadge({ connected, error }) {
   if (error) return <span className="status-badge disconnected">{error}</span>;
