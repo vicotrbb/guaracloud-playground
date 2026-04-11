@@ -14,6 +14,11 @@ function StatusBadge({ connected, error }) {
 export default function App() {
   const [status, setStatus] = useState(null);
 
+  // MySQL
+  const [mysqlPayload, setMysqlPayload] = useState("");
+  const [mysqlRows, setMysqlRows] = useState([]);
+  const [mysqlInfo, setMysqlInfo] = useState(null);
+
   // Qdrant
   const [qdrantPayload, setQdrantPayload] = useState("");
   const [qdrantPoints, setQdrantPoints] = useState([]);
@@ -72,8 +77,38 @@ export default function App() {
     const data = await api("/test/all", { method: "POST" });
     if (data) {
       addLog(
-        `Test all: Qdrant=${data.qdrant?.ok} Mailpit=${data.mailpit?.ok}`,
+        `Test all: MySQL=${data.mysql?.ok} Qdrant=${data.qdrant?.ok} Mailpit=${data.mailpit?.ok}`,
       );
+    }
+  };
+
+  // --- MySQL ---
+  const insertMysql = async () => {
+    if (!mysqlPayload.trim()) return;
+    const data = await api("/mysql/insert", {
+      method: "POST",
+      body: JSON.stringify({ payload: mysqlPayload }),
+    });
+    if (data) {
+      addLog(`MySQL inserted id=${data.id}`);
+      setMysqlPayload("");
+      fetchMysqlRows();
+    }
+  };
+
+  const fetchMysqlRows = async () => {
+    const data = await api("/mysql/rows");
+    if (data?.rows) {
+      setMysqlRows(data.rows);
+      addLog(`MySQL: ${data.rows.length} rows`);
+    }
+  };
+
+  const fetchMysqlInfo = async () => {
+    const data = await api("/mysql/info");
+    if (data) {
+      setMysqlInfo(data);
+      addLog(`MySQL version: ${data.version}, rows: ${data.rowCount}`);
     }
   };
 
@@ -114,7 +149,6 @@ export default function App() {
   };
 
   const searchQdrant = async () => {
-    // Search with a random vector for testing
     const vector = Array.from({ length: 4 }, () => Math.random() * 2 - 1);
     const data = await api("/qdrant/search", {
       method: "POST",
@@ -172,10 +206,17 @@ export default function App() {
     <div className="container">
       <h1>Catalog Integration Test</h1>
       <p className="subtitle">
-        Testing Qdrant and Mailpit catalog services on Guara Cloud
+        Testing MySQL, Qdrant, and Mailpit catalog services on Guara Cloud
       </p>
 
       <div className="status-grid">
+        <div className="status-card">
+          <h3>MySQL</h3>
+          <StatusBadge
+            connected={status.services?.mysql?.connected}
+            error={status.services?.mysql?.error}
+          />
+        </div>
         <div className="status-card">
           <h3>Qdrant</h3>
           <StatusBadge
@@ -204,6 +245,34 @@ export default function App() {
         <button className="btn btn-primary" onClick={fetchStatus}>
           Refresh Status
         </button>
+      </div>
+
+      {/* MySQL */}
+      <div className="section">
+        <h2>MySQL - Relational Database</h2>
+        <div className="row">
+          <input
+            placeholder="Row payload text"
+            value={mysqlPayload}
+            onChange={(e) => setMysqlPayload(e.target.value)}
+            style={{ width: "250px" }}
+          />
+          <button className="btn btn-success" onClick={insertMysql}>
+            Insert Row
+          </button>
+          <button className="btn btn-primary" onClick={fetchMysqlRows}>
+            List Rows
+          </button>
+          <button className="btn btn-primary" onClick={fetchMysqlInfo}>
+            Server Info
+          </button>
+        </div>
+        {mysqlInfo && (
+          <pre>{JSON.stringify(mysqlInfo, null, 2)}</pre>
+        )}
+        {mysqlRows.length > 0 && (
+          <pre>{JSON.stringify(mysqlRows.slice(0, 10), null, 2)}</pre>
+        )}
       </div>
 
       {/* Qdrant */}

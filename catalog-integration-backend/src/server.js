@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { createPool } from "mysql2/promise";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import nodemailer from "nodemailer";
 
@@ -10,10 +11,12 @@ app.use(cors());
 app.use(express.json());
 
 const state = {
+  mysql: { connected: false, error: null },
   qdrant: { connected: false, error: null },
   mailpit: { connected: false, error: null },
 };
 
+let mysqlPool = null;
 let qdrantClient = null;
 let mailTransporter = null;
 let mailpitHost = null;
@@ -21,7 +24,57 @@ let mailpitPort = null;
 let mailpitWebUrl = null;
 
 const QDRANT_COLLECTION = "test-collection";
-const VECTOR_SIZE = 4; // small vector for testing
+const VECTOR_SIZE = 4;
+const MYSQL_TABLE = "catalog_test";
+
+// ---------------------------------------------------------------------------
+// MySQL
+// ---------------------------------------------------------------------------
+
+async function initMysql() {
+  const host = process.env.MYSQL_HOST || process.env.CATALOG_MYSQL_HOST;
+  const port = process.env.MYSQL_PORT || process.env.CATALOG_MYSQL_PORT || "3306";
+  const user = process.env.MYSQL_USER || process.env.CATALOG_MYSQL_USER || "root";
+  const password = process.env.MYSQL_PASSWORD || process.env.CATALOG_MYSQL_PASSWORD;
+  const database = process.env.MYSQL_DATABASE || process.env.CATALOG_MYSQL_DATABASE;
+
+  if (!host) {
+    state.mysql.error = "MYSQL_HOST not set";
+    console.error("[mysql] MYSQL_HOST env var not found");
+    return;
+  }
+  try {
+    mysqlPool = createPool({
+      host,
+      port: Number(port),
+      user,
+      password,
+      database,
+      waitForConnections: true,
+      connectionLimit: 5,
+    });
+
+    // Health check
+    const conn = await mysqlPool.getConnection();
+    await conn.ping();
+    conn.release();
+
+    // Ensure test table exists
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS ${MYSQL_TABLE} (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    state.mysql.connected = true;
+    console.log("[mysql] Connected, table ready:", MYSQL_TABLE);
+  } catch (err) {
+    state.mysql.error = err.message;
+    console.error("[mysql] Connection failed:", err.message);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Qdrant
@@ -38,9 +91,7 @@ async function initQdrant() {
   }
   try {
     qdrantClient = new QdrantClient({ url, apiKey: apiKey ?? undefined });
-    // Health check
     await qdrantClient.getCollections();
-    // Ensure test collection exists
     const collections = await qdrantClient.getCollections();
     const exists = collections.collections.some(
       (c) => c.name === QDRANT_COLLECTION,
@@ -102,6 +153,7 @@ app.get("/", (_req, res) => {
   res.json({
     message: "Catalog Integration Backend",
     services: {
+      mysql: state.mysql,
       qdrant: state.qdrant,
       mailpit: state.mailpit,
     },
@@ -109,11 +161,66 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  const allConnected = state.qdrant.connected && state.mailpit.connected;
+  const allConnected =
+    state.mysql.connected &&
+    state.qdrant.connected &&
+    state.mailpit.connected;
   res.status(allConnected ? 200 : 503).json({
     status: allConnected ? "healthy" : "degraded",
     services: state,
   });
+});
+
+// ---------------------------------------------------------------------------
+// MySQL endpoints
+// ---------------------------------------------------------------------------
+
+app.post("/mysql/insert", async (req, res) => {
+  if (!mysqlPool)
+    return res.status(503).json({ error: "MySQL not connected" });
+  const { payload } = req.body;
+  if (!payload)
+    return res.status(400).json({ error: "payload is required" });
+  try {
+    const [result] = await mysqlPool.execute(
+      `INSERT INTO ${MYSQL_TABLE} (payload) VALUES (?)`,
+      [typeof payload === "string" ? payload : JSON.stringify(payload)],
+    );
+    res.status(201).json({ id: result.insertId, payload });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/mysql/rows", async (_req, res) => {
+  if (!mysqlPool)
+    return res.status(503).json({ error: "MySQL not connected" });
+  try {
+    const [rows] = await mysqlPool.execute(
+      `SELECT * FROM ${MYSQL_TABLE} ORDER BY id DESC LIMIT 20`,
+    );
+    res.json({ rows, table: MYSQL_TABLE });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/mysql/info", async (_req, res) => {
+  if (!mysqlPool)
+    return res.status(503).json({ error: "MySQL not connected" });
+  try {
+    const [[versionRow]] = await mysqlPool.execute("SELECT VERSION() as version");
+    const [[countRow]] = await mysqlPool.execute(
+      `SELECT COUNT(*) as count FROM ${MYSQL_TABLE}`,
+    );
+    res.json({
+      version: versionRow.version,
+      table: MYSQL_TABLE,
+      rowCount: countRow.count,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -142,7 +249,6 @@ app.post("/qdrant/points", async (req, res) => {
   if (!payload) return res.status(400).json({ error: "payload is required" });
   try {
     const id = Date.now();
-    // Generate a random vector of size VECTOR_SIZE
     const vector = Array.from(
       { length: VECTOR_SIZE },
       () => Math.random() * 2 - 1,
@@ -253,7 +359,25 @@ app.get("/mailpit/info", async (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.post("/test/all", async (_req, res) => {
-  const results = { qdrant: null, mailpit: null };
+  const results = { mysql: null, qdrant: null, mailpit: null };
+
+  if (mysqlPool) {
+    try {
+      const [result] = await mysqlPool.execute(
+        `INSERT INTO ${MYSQL_TABLE} (payload) VALUES (?)`,
+        [`test-all-${Date.now()}`],
+      );
+      const [[row]] = await mysqlPool.execute(
+        `SELECT * FROM ${MYSQL_TABLE} WHERE id = ?`,
+        [result.insertId],
+      );
+      results.mysql = { ok: true, insertedId: result.insertId, row };
+    } catch (err) {
+      results.mysql = { ok: false, error: err.message };
+    }
+  } else {
+    results.mysql = { ok: false, error: "not connected" };
+  }
 
   if (qdrantClient) {
     try {
@@ -298,6 +422,7 @@ app.post("/test/all", async (_req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`[server] Listening on port ${PORT}`);
+  initMysql();
   initQdrant();
   initMailpit();
 });
