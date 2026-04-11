@@ -33,6 +33,13 @@ export default function App() {
   const [mailMessages, setMailMessages] = useState([]);
   const [mailInfo, setMailInfo] = useState(null);
 
+  // MinIO
+  const [minioKey, setMinioKey] = useState("");
+  const [minioContent, setMinioContent] = useState("");
+  const [minioObjects, setMinioObjects] = useState([]);
+  const [minioInfo, setMinioInfo] = useState(null);
+  const [minioUploadResult, setMinioUploadResult] = useState(null);
+
   const [logs, setLogs] = useState([]);
 
   const addLog = useCallback((msg) => {
@@ -77,7 +84,7 @@ export default function App() {
     const data = await api("/test/all", { method: "POST" });
     if (data) {
       addLog(
-        `Test all: MySQL=${data.mysql?.ok} Qdrant=${data.qdrant?.ok} Mailpit=${data.mailpit?.ok}`,
+        `Test all: MySQL=${data.mysql?.ok} Qdrant=${data.qdrant?.ok} Mailpit=${data.mailpit?.ok} MinIO=${data.minio?.ok}`,
       );
     }
   };
@@ -196,6 +203,38 @@ export default function App() {
     }
   };
 
+  // --- MinIO ---
+  const uploadMinioObject = async () => {
+    if (!minioKey.trim() || !minioContent.trim()) return;
+    const data = await api("/minio/objects", {
+      method: "POST",
+      body: JSON.stringify({ key: minioKey, content: minioContent }),
+    });
+    if (data) {
+      addLog(`MinIO uploaded key=${data.key} size=${data.size}`);
+      setMinioKey("");
+      setMinioContent("");
+      setMinioUploadResult(data);
+      fetchMinioObjects();
+    }
+  };
+
+  const fetchMinioObjects = async () => {
+    const data = await api("/minio/objects");
+    if (data?.objects) {
+      setMinioObjects(data.objects);
+      addLog(`MinIO: ${data.objects.length} objects in bucket`);
+    }
+  };
+
+  const fetchMinioInfo = async () => {
+    const data = await api("/minio/info");
+    if (data) {
+      setMinioInfo(data);
+      addLog(`MinIO info: ${data.buckets?.length ?? "?"} buckets`);
+    }
+  };
+
   if (!status) {
     return (
       <div style={{ textAlign: "center", padding: "4rem" }}>Loading...</div>
@@ -206,7 +245,7 @@ export default function App() {
     <div className="container">
       <h1>Catalog Integration Test</h1>
       <p className="subtitle">
-        Testing MySQL, Qdrant, and Mailpit catalog services on Guara Cloud
+        Testing MySQL, Qdrant, Mailpit, and MinIO catalog services on Guara Cloud
       </p>
 
       <div className="status-grid">
@@ -229,6 +268,13 @@ export default function App() {
           <StatusBadge
             connected={status.services?.mailpit?.connected}
             error={status.services?.mailpit?.error}
+          />
+        </div>
+        <div className="status-card">
+          <h3>MinIO</h3>
+          <StatusBadge
+            connected={status.services?.minio?.connected}
+            error={status.services?.minio?.error}
           />
         </div>
         <div className="status-card">
@@ -342,6 +388,39 @@ export default function App() {
         {mailResult && <pre>{JSON.stringify(mailResult, null, 2)}</pre>}
         {mailMessages.length > 0 && (
           <pre>{JSON.stringify(mailMessages, null, 2)}</pre>
+        )}
+      </div>
+
+      {/* MinIO */}
+      <div className="section">
+        <h2>MinIO - Object Storage</h2>
+        <div className="row">
+          <input
+            placeholder="Object key (e.g. test/file.txt)"
+            value={minioKey}
+            onChange={(e) => setMinioKey(e.target.value)}
+            style={{ width: "200px" }}
+          />
+          <input
+            placeholder="Content"
+            value={minioContent}
+            onChange={(e) => setMinioContent(e.target.value)}
+            style={{ width: "200px" }}
+          />
+          <button className="btn btn-success" onClick={uploadMinioObject}>
+            Upload
+          </button>
+          <button className="btn btn-primary" onClick={fetchMinioObjects}>
+            List Objects
+          </button>
+          <button className="btn btn-primary" onClick={fetchMinioInfo}>
+            Bucket Info
+          </button>
+        </div>
+        {minioInfo && <pre>{JSON.stringify(minioInfo, null, 2)}</pre>}
+        {minioUploadResult && <pre>{JSON.stringify(minioUploadResult, null, 2)}</pre>}
+        {minioObjects.length > 0 && (
+          <pre>{JSON.stringify(minioObjects.slice(0, 10), null, 2)}</pre>
         )}
       </div>
 

@@ -3,6 +3,7 @@ import express from "express";
 import { createPool } from "mysql2/promise";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import nodemailer from "nodemailer";
+import { Client as MinioClient } from "minio";
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -14,6 +15,7 @@ const state = {
   mysql: { connected: false, error: null },
   qdrant: { connected: false, error: null },
   mailpit: { connected: false, error: null },
+  minio: { connected: false, error: null },
 };
 
 let mysqlPool = null;
@@ -22,10 +24,12 @@ let mailTransporter = null;
 let mailpitHost = null;
 let mailpitPort = null;
 let mailpitWebUrl = null;
+let minioClient = null;
 
 const QDRANT_COLLECTION = "test-collection";
 const VECTOR_SIZE = 4;
 const MYSQL_TABLE = "catalog_test";
+const MINIO_BUCKET = "test-bucket";
 
 // ---------------------------------------------------------------------------
 // MySQL
@@ -54,12 +58,10 @@ async function initMysql() {
       connectionLimit: 5,
     });
 
-    // Health check
     const conn = await mysqlPool.getConnection();
     await conn.ping();
     conn.release();
 
-    // Ensure test table exists
     await mysqlPool.execute(`
       CREATE TABLE IF NOT EXISTS ${MYSQL_TABLE} (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -146,6 +148,50 @@ async function initMailpit() {
 }
 
 // ---------------------------------------------------------------------------
+// MinIO (S3-compatible object storage)
+// ---------------------------------------------------------------------------
+
+async function initMinio() {
+  const endpoint = process.env.MINIO_ENDPOINT || process.env.CATALOG_MINIO_ENDPOINT;
+  const accessKey = process.env.MINIO_ACCESS_KEY || process.env.CATALOG_MINIO_ACCESS_KEY;
+  const secretKey = process.env.MINIO_SECRET_KEY || process.env.CATALOG_MINIO_SECRET_KEY;
+
+  if (!endpoint) {
+    state.minio.error = "MINIO_ENDPOINT not set";
+    console.error("[minio] MINIO_ENDPOINT env var not found");
+    return;
+  }
+
+  const [endpointHost, portStr] = endpoint.split(":");
+  const port = portStr ? parseInt(portStr, 10) : 9000;
+
+  try {
+    minioClient = new MinioClient({
+      endPoint: endpointHost,
+      port,
+      useSSL: false,
+      accessKey: accessKey ?? "",
+      secretKey: secretKey ?? "",
+    });
+
+    // Health check: list buckets
+    await minioClient.listBuckets();
+
+    // Ensure test bucket exists
+    const exists = await minioClient.bucketExists(MINIO_BUCKET);
+    if (!exists) {
+      await minioClient.makeBucket(MINIO_BUCKET);
+    }
+
+    state.minio.connected = true;
+    console.log("[minio] Connected, bucket ready:", MINIO_BUCKET);
+  } catch (err) {
+    state.minio.error = err.message;
+    console.error("[minio] Connection failed:", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Status / health
 // ---------------------------------------------------------------------------
 
@@ -156,6 +202,7 @@ app.get("/", (_req, res) => {
       mysql: state.mysql,
       qdrant: state.qdrant,
       mailpit: state.mailpit,
+      minio: state.minio,
     },
   });
 });
@@ -164,7 +211,8 @@ app.get("/health", (_req, res) => {
   const allConnected =
     state.mysql.connected &&
     state.qdrant.connected &&
-    state.mailpit.connected;
+    state.mailpit.connected &&
+    state.minio.connected;
   res.status(allConnected ? 200 : 503).json({
     status: allConnected ? "healthy" : "degraded",
     services: state,
@@ -355,11 +403,69 @@ app.get("/mailpit/info", async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// MinIO endpoints
+// ---------------------------------------------------------------------------
+
+app.post("/minio/objects", async (req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  const { key, content } = req.body;
+  if (!key || !content)
+    return res.status(400).json({ error: "key and content are required" });
+  try {
+    const body = typeof content === "string" ? content : JSON.stringify(content);
+    await minioClient.putObject(MINIO_BUCKET, key, body, body.length, {
+      "Content-Type": "text/plain",
+    });
+    res.status(201).json({ bucket: MINIO_BUCKET, key, size: body.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/minio/objects", async (_req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  try {
+    const objects = [];
+    await new Promise((resolve, reject) => {
+      const stream = minioClient.listObjects(MINIO_BUCKET, "", true);
+      stream.on("data", (obj) => objects.push({
+        key: obj.name,
+        size: obj.size,
+        lastModified: obj.lastModified,
+      }));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    res.json({ bucket: MINIO_BUCKET, objects });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/minio/info", async (_req, res) => {
+  if (!minioClient)
+    return res.status(503).json({ error: "MinIO not connected" });
+  try {
+    const buckets = await minioClient.listBuckets();
+    const stat = await minioClient.statObject(MINIO_BUCKET, "").catch(() => null);
+    res.json({
+      bucket: MINIO_BUCKET,
+      buckets: buckets.map((b) => ({ name: b.name, creationDate: b.creationDate })),
+      stat,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Combined test endpoint
 // ---------------------------------------------------------------------------
 
 app.post("/test/all", async (_req, res) => {
-  const results = { mysql: null, qdrant: null, mailpit: null };
+  const results = { mysql: null, qdrant: null, mailpit: null, minio: null };
 
   if (mysqlPool) {
     try {
@@ -413,6 +519,20 @@ app.post("/test/all", async (_req, res) => {
     results.mailpit = { ok: false, error: "not connected" };
   }
 
+  if (minioClient) {
+    try {
+      const key = `test-all-${Date.now()}.txt`;
+      const body = `catalog integration test ${Date.now()}`;
+      await minioClient.putObject(MINIO_BUCKET, key, body, body.length);
+      const stat = await minioClient.statObject(MINIO_BUCKET, key);
+      results.minio = { ok: true, key, size: stat.size };
+    } catch (err) {
+      results.minio = { ok: false, error: err.message };
+    }
+  } else {
+    results.minio = { ok: false, error: "not connected" };
+  }
+
   res.json(results);
 });
 
@@ -425,6 +545,7 @@ const server = app.listen(PORT, () => {
   initMysql();
   initQdrant();
   initMailpit();
+  initMinio();
 });
 
 process.on("SIGTERM", () => {
