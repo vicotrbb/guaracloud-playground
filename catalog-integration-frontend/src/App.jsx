@@ -1,3 +1,4 @@
+// catalog-test-3: postgres, redis, nats
 import React, { useState, useEffect, useCallback } from "react";
 
 const API = import.meta.env.VITE_BACKEND_URL
