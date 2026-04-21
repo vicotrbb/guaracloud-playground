@@ -1,9 +1,9 @@
-// catalog-test-3: postgres, redis, nats (build var set)
+// catalog-test-4: postgres, redis, nats
 import React, { useState, useEffect, useCallback } from "react";
 
 const API = import.meta.env.VITE_BACKEND_URL
   ? `${import.meta.env.VITE_BACKEND_URL.replace(/\/$/, "")}`
-  : "https://catalog-integration-backend-b18233-catalog-test-3.guaracloud.com";
+  : "https://catalog-integration-backend-132ff0-catalog-test-4.guaracloud.com";
 
 function StatusBadge({ connected, error }) {
   if (error) return <span className="status-badge disconnected">{error}</span>;
