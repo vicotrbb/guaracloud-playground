@@ -7,7 +7,7 @@ const API = import.meta.env.VITE_BACKEND_URL
 
 const WORKER = import.meta.env.VITE_WORKER_URL
   ? `${import.meta.env.VITE_WORKER_URL.replace(/\/$/, "")}`
-  : "https://catalog-integration-worker-catalog-test-4.guaracloud.com";
+  : "https://catalog-integration-worker-261483-catalog-test-4.guaracloud.com";
 
 const CRON_FIXED_BODY = {
   source: "guara-cron",
