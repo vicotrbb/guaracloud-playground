@@ -24,6 +24,8 @@ const sc = StringCodec();
 
 const PG_TABLE = "catalog_test";
 const NATS_SUBJECT = "catalog.test";
+const NATS_WORKER_SUBJECT =
+  process.env.NATS_WORKER_SUBJECT || "catalog.worker.events";
 
 // ---------------------------------------------------------------------------
 // Postgres
@@ -173,8 +175,12 @@ app.post("/postgres/insert", async (req, res) => {
       `INSERT INTO ${PG_TABLE} (payload) VALUES ($1) RETURNING *`,
       [typeof payload === "string" ? payload : JSON.stringify(payload)],
     );
+    console.log(
+      `[postgres] insert id=${result.rows[0].id} payload="${result.rows[0].payload}"`,
+    );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    console.error(`[postgres] insert failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -185,8 +191,10 @@ app.get("/postgres/rows", async (_req, res) => {
     const result = await pgPool.query(
       `SELECT * FROM ${PG_TABLE} ORDER BY id DESC LIMIT 20`,
     );
+    console.log(`[postgres] list ${result.rows.length} rows`);
     res.json({ rows: result.rows, table: PG_TABLE });
   } catch (err) {
+    console.error(`[postgres] list failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -223,8 +231,10 @@ app.post("/redis/set", async (req, res) => {
     } else {
       await redisClient.set(key, val);
     }
+    console.log(`[redis] SET key=${key} ttl=${ttl ?? "none"}`);
     res.status(201).json({ key, value: val, ttl: ttl ?? null });
   } catch (err) {
+    console.error(`[redis] SET failed key=${key}: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -233,9 +243,14 @@ app.get("/redis/get/:key", async (req, res) => {
   if (!redisClient) return res.status(503).json({ error: "Redis not connected" });
   try {
     const value = await redisClient.get(req.params.key);
-    if (value === null) return res.status(404).json({ error: "Key not found" });
+    if (value === null) {
+      console.log(`[redis] GET key=${req.params.key} miss`);
+      return res.status(404).json({ error: "Key not found" });
+    }
+    console.log(`[redis] GET key=${req.params.key} hit`);
     res.json({ key: req.params.key, value });
   } catch (err) {
+    console.error(`[redis] GET failed key=${req.params.key}: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -275,8 +290,33 @@ app.post("/nats/publish", async (req, res) => {
   try {
     const payload = typeof message === "string" ? message : JSON.stringify(message);
     natsConnection.publish(subject ?? NATS_SUBJECT, sc.encode(payload));
+    console.log(
+      `[nats] publish subject=${subject ?? NATS_SUBJECT} bytes=${payload.length}`,
+    );
     res.json({ subject: subject ?? NATS_SUBJECT, message: payload });
   } catch (err) {
+    console.error(`[nats] publish failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/worker/notify", async (req, res) => {
+  if (!natsConnection) {
+    return res.status(503).json({ error: "NATS not connected" });
+  }
+  const message =
+    req.body?.message !== undefined
+      ? req.body.message
+      : { source: "backend", note: "worker-notify", at: new Date().toISOString() };
+  const payload = typeof message === "string" ? message : JSON.stringify(message);
+  try {
+    natsConnection.publish(NATS_WORKER_SUBJECT, sc.encode(payload));
+    console.log(
+      `[worker-notify] published subject=${NATS_WORKER_SUBJECT} bytes=${payload.length}`,
+    );
+    res.json({ subject: NATS_WORKER_SUBJECT, message: payload });
+  } catch (err) {
+    console.error(`[worker-notify] failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
