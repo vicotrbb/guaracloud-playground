@@ -4,6 +4,6 @@ import { Controller, Get } from "@nestjs/common";
 export class AppController {
   @Get()
   hello() {
-    return { message: "Hello from NestJS 11!" };
+    return { message: "Hello from NestJS 12!" };
   }
 }
