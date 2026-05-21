@@ -14,7 +14,8 @@ app.use(express.json());
 const state = {
   postgres: { connected: false, error: null },
   redis: { connected: false, error: null },
-  nats: { connected: false, error: null },
+  nats: { connected: false, error: null, source: null, server: null },
+  external: {},
 };
 
 let pgPool = null;
@@ -26,6 +27,158 @@ const PG_TABLE = "catalog_test";
 const NATS_SUBJECT = "catalog.test";
 const NATS_WORKER_SUBJECT =
   process.env.NATS_WORKER_SUBJECT || "catalog.worker.events";
+const NATS_PREFIX_PREFERENCES = [
+  "NATS",
+  "CATALOG_NATS",
+  "TESTE_CATALOG",
+  "TESTE_NATS",
+  "NATS_SERVICE",
+];
+const EXTERNAL_APIS = [
+  {
+    name: "jsonplaceholder",
+    endpoint: "https://jsonplaceholder.typicode.com/posts/1",
+    select: (data) => ({ id: data.id, title: data.title }),
+  },
+  {
+    name: "httpbin",
+    endpoint: "https://httpbin.org/ip",
+    select: (data) => ({ origin: data.origin }),
+  },
+  {
+    name: "dummyjson",
+    endpoint: "https://dummyjson.com/products/1",
+    select: (data) => ({ id: data.id, title: data.title, category: data.category }),
+  },
+];
+
+for (const api of EXTERNAL_APIS) {
+  state.external[api.name] = {
+    status: "unknown",
+    endpoint: api.endpoint,
+    lastChecked: null,
+    latencyMs: null,
+    data: null,
+    error: null,
+  };
+}
+
+function normalizeNatsServer({ url, host, port }) {
+  if (host) {
+    return `nats://${host}:${port || "4222"}`;
+  }
+
+  if (!url) return null;
+  if (url.startsWith("nats://") || url.startsWith("tls://") || url.startsWith("ws://")) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return `nats://${parsed.hostname}:${parsed.port || port || "4222"}`;
+  } catch {
+    return `nats://${url.replace(/^\/+/, "")}`;
+  }
+}
+
+function readNatsConfig(prefix) {
+  const url = process.env[`${prefix}_URL`];
+  const host = process.env[`${prefix}_HOST`];
+  const port = process.env[`${prefix}_PORT`] || "4222";
+  const user = process.env.NATS_USER || process.env[`${prefix}_USER`];
+  const password = process.env.NATS_PASSWORD || process.env[`${prefix}_PASSWORD`];
+  const server = normalizeNatsServer({ url, host, port });
+
+  if (!server) return null;
+  return { server, user, password, source: prefix };
+}
+
+function resolveNatsConfig() {
+  for (const prefix of NATS_PREFIX_PREFERENCES) {
+    const config = readNatsConfig(prefix);
+    if (config) return config;
+  }
+
+  const hostPrefixes = Object.keys(process.env)
+    .filter((key) => key.endsWith("_HOST"))
+    .map((key) => key.slice(0, -5));
+
+  for (const prefix of hostPrefixes) {
+    const port = process.env[`${prefix}_PORT`];
+    if (port === "4222" || prefix.includes("NATS")) {
+      const config = readNatsConfig(prefix);
+      if (config) return config;
+    }
+  }
+
+  return null;
+}
+
+async function fetchJsonWithTimeout(endpoint, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, { signal: controller.signal });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkExternalApi(api) {
+  const start = Date.now();
+  try {
+    const data = await fetchJsonWithTimeout(api.endpoint);
+    const latencyMs = Date.now() - start;
+    const selected = api.select(data);
+    const previous = state.external[api.name].status;
+
+    state.external[api.name] = {
+      status: "ok",
+      endpoint: api.endpoint,
+      lastChecked: new Date().toISOString(),
+      latencyMs,
+      data: selected,
+      error: null,
+    };
+
+    if (previous !== "ok") {
+      console.log(`[external] ${api.name}: ${previous} -> ok (${latencyMs}ms)`);
+    }
+  } catch (err) {
+    const previous = state.external[api.name].status;
+    state.external[api.name] = {
+      ...state.external[api.name],
+      status: "unreachable",
+      lastChecked: new Date().toISOString(),
+      latencyMs: null,
+      error: err.message,
+    };
+
+    if (previous !== "unreachable") {
+      console.error(`[external] ${api.name}: ${previous} -> unreachable (${err.message})`);
+    }
+  }
+}
+
+async function checkExternalApis() {
+  await Promise.allSettled(EXTERNAL_APIS.map((api) => checkExternalApi(api)));
+  return state.external;
+}
+
+function startExternalChecks(intervalMs = 30000) {
+  checkExternalApis().then((external) => {
+    const statuses = Object.entries(external)
+      .map(([name, result]) => `${name}:${result.status}`)
+      .join(", ");
+    console.log(`[external] Initial status: ${statuses}`);
+  });
+  setInterval(() => checkExternalApis(), intervalMs);
+}
 
 // ---------------------------------------------------------------------------
 // Postgres
@@ -109,31 +262,37 @@ async function initRedis() {
 // ---------------------------------------------------------------------------
 
 async function initNats() {
-  const url = process.env.NATS_URL;
-  const host = process.env.NATS_HOST;
-  const port = process.env.NATS_PORT || "4222";
-  const user = process.env.NATS_USER;
-  const password = process.env.NATS_PASSWORD;
+  const config = resolveNatsConfig();
 
-  if (!host && !url) {
-    state.nats.error = "NATS_HOST not set";
-    console.error("[nats] NATS_HOST env var not found");
+  if (!config) {
+    state.nats.error = "NATS service env vars not found";
+    console.error(
+      "[nats] No NATS env vars found. Expected NATS_* or service discovery vars such as TESTE_CATALOG_*",
+    );
     return;
   }
 
-  const servers = url ?? `nats://${host}:${port}`;
-
   try {
     natsConnection = await natsConnect({
-      servers,
-      user: user || undefined,
-      pass: password || undefined,
+      servers: config.server,
+      user: config.user || undefined,
+      pass: config.password || undefined,
     });
 
-    state.nats.connected = true;
-    console.log("[nats] Connected:", servers);
+    state.nats = {
+      connected: true,
+      error: null,
+      source: config.source,
+      server: config.server,
+    };
+    console.log(`[nats] Connected via ${config.source}: ${config.server}`);
   } catch (err) {
-    state.nats.error = err.message;
+    state.nats = {
+      connected: false,
+      error: err.message,
+      source: config.source,
+      server: config.server,
+    };
     console.error("[nats] Connection failed:", err.message);
   }
 }
@@ -150,6 +309,7 @@ app.get("/", (_req, res) => {
       redis: state.redis,
       nats: state.nats,
     },
+    externalApis: state.external,
   });
 });
 
@@ -355,11 +515,24 @@ app.get("/nats/info", async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// External outbound checks
+// ---------------------------------------------------------------------------
+
+app.get("/external", async (_req, res) => {
+  const external = await checkExternalApis();
+  res.json({
+    service: "catalog-integration-backend",
+    externals: external,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Combined test endpoint
 // ---------------------------------------------------------------------------
 
 app.post("/test/all", async (_req, res) => {
-  const results = { postgres: null, redis: null, nats: null };
+  const results = { postgres: null, redis: null, nats: null, external: null };
 
   if (pgPool) {
     try {
@@ -400,6 +573,14 @@ app.post("/test/all", async (_req, res) => {
     results.nats = { ok: false, error: "not connected" };
   }
 
+  const external = await checkExternalApis();
+  results.external = Object.fromEntries(
+    Object.entries(external).map(([name, result]) => [
+      name,
+      { ok: result.status === "ok", latencyMs: result.latencyMs, error: result.error },
+    ]),
+  );
+
   res.json(results);
 });
 
@@ -412,6 +593,7 @@ const server = app.listen(PORT, () => {
   initPostgres();
   initRedis();
   initNats();
+  startExternalChecks();
 });
 
 process.on("SIGTERM", async () => {

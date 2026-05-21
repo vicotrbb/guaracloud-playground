@@ -52,6 +52,8 @@ export default function App() {
   const [workerRuns, setWorkerRuns] = useState([]);
   const [cronTicks, setCronTicks] = useState([]);
   const [workerReceived, setWorkerReceived] = useState([]);
+  const [backendExternal, setBackendExternal] = useState(null);
+  const [workerExternal, setWorkerExternal] = useState(null);
 
   const [logs, setLogs] = useState([]);
 
@@ -111,8 +113,13 @@ export default function App() {
   const testAll = async () => {
     const data = await api("/test/all", { method: "POST" });
     if (data) {
+      const externalSummary = data.external
+        ? Object.entries(data.external)
+            .map(([name, result]) => `${name}=${result.ok}`)
+            .join(" ")
+        : "external=n/a";
       addLog(
-        `Test all: Postgres=${data.postgres?.ok} Redis=${data.redis?.ok} NATS=${data.nats?.ok}`,
+        `Test all: Postgres=${data.postgres?.ok} Redis=${data.redis?.ok} NATS=${data.nats?.ok} ${externalSummary}`,
       );
     }
   };
@@ -287,6 +294,36 @@ export default function App() {
     }
   };
 
+  const fetchBackendExternal = async () => {
+    const data = await api("/external");
+    if (data?.externals) {
+      setBackendExternal(data);
+      const okCount = Object.values(data.externals).filter(
+        (result) => result.status === "ok",
+      ).length;
+      addLog(`Backend outbound APIs: ${okCount}/${Object.keys(data.externals).length} ok`);
+    } else if (data?.error) {
+      addLog(`Backend outbound error: ${data.error}`);
+    }
+  };
+
+  const fetchWorkerExternal = async () => {
+    const data = await workerApi("/external");
+    if (data?.externals) {
+      setWorkerExternal(data);
+      const okCount = Object.values(data.externals).filter(
+        (result) => result.status === "ok",
+      ).length;
+      addLog(`Worker outbound APIs: ${okCount}/${Object.keys(data.externals).length} ok`);
+    } else if (data?.error) {
+      addLog(`Worker outbound error: ${data.error}`);
+    }
+  };
+
+  const fetchAllExternal = async () => {
+    await Promise.allSettled([fetchBackendExternal(), fetchWorkerExternal()]);
+  };
+
   if (!status) {
     return (
       <div style={{ textAlign: "center", padding: "4rem" }}>Loading...</div>
@@ -347,6 +384,9 @@ export default function App() {
         <h2>Quick Test</h2>
         <button className="btn btn-primary" onClick={testAll}>
           Test All Services
+        </button>
+        <button className="btn btn-primary" onClick={fetchAllExternal}>
+          Test Outbound APIs
         </button>
         <button
           className="btn btn-primary"
@@ -522,6 +562,37 @@ export default function App() {
         </div>
         {workerReceived.length > 0 && (
           <pre>{JSON.stringify(workerReceived.slice(0, 10), null, 2)}</pre>
+        )}
+      </div>
+
+      <div className="section">
+        <h2>Outbound API Calls</h2>
+        <p className="subtitle" style={{ marginTop: 0 }}>
+          Backend and worker call public toy APIs to validate outbound network
+          traffic from Guara Cloud services.
+        </p>
+        <div className="row">
+          <button className="btn btn-primary" onClick={fetchBackendExternal}>
+            Backend outbound
+          </button>
+          <button className="btn btn-primary" onClick={fetchWorkerExternal}>
+            Worker outbound
+          </button>
+          <button className="btn btn-success" onClick={fetchAllExternal}>
+            Test both
+          </button>
+        </div>
+        {backendExternal && (
+          <>
+            <h3>Backend</h3>
+            <pre>{JSON.stringify(backendExternal, null, 2)}</pre>
+          </>
+        )}
+        {workerExternal && (
+          <>
+            <h3>Worker</h3>
+            <pre>{JSON.stringify(workerExternal, null, 2)}</pre>
+          </>
         )}
       </div>
 
