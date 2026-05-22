@@ -11,6 +11,12 @@ const NATS_WORKER_SUBJECT =
   process.env.NATS_WORKER_SUBJECT || "catalog.worker.events";
 
 app.use(cors());
+app.use((_req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("X-Powered-By", "CatalogIntegrationWorker/express");
+  next();
+});
 app.use(express.json());
 
 const state = {
