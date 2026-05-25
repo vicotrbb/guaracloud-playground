@@ -14,7 +14,6 @@ app.use(cors());
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("X-Powered-By", "CatalogIntegrationWorker/express");
   next();
 });
 app.use(express.json());
